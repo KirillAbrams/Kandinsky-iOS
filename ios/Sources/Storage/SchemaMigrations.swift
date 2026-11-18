@@ -1,3 +1,6 @@
+// Создаёт местные таблицы и обновляет данные прежних версий. Существующие чаты, сообщения,
+// черновики и точки чтения переходят вместе со схемой.
+
 import Foundation
 enum SchemaMigrations {
   static let version: Int64 = 3
@@ -35,6 +38,8 @@ enum SchemaMigrations {
     """,
     "CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL)"
   ]
+  // Проверяет номер схемы, по очереди добавляет новые поля и порциями заполняет текст для поиска.
+  // Версию меняет в конце общей записи, поэтому сбой не выдаст частичное обновление за готовое.
   static func apply(_ db: SQLiteConnection) throws {
     let old = try db.scalar("PRAGMA user_version")
     guard old <= version else { throw RepoError.corrupt }

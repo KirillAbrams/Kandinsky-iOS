@@ -1,9 +1,14 @@
+// Проверяет черновики, точки чтения и повторные отправки айфона на отдельной базе. Воспроизводит
+// сбои записи, старую схему, обрыв ответа и перезапуск состояния.
+
 import UIKit
 import XCTest
 
 @testable import Kandinsky
 
 @MainActor final class ConversationStateTests: XCTestCase {
+  // Меняет текст и ждёт автоматическую запись без отправки или закрытия. Проверяет, что последняя
+  // правка сохранилась и задача не отменила себя.
   func testIdleDraftSavesLatestInputWithoutSendingOrClosing() async throws {
     let h = try await RepositoryHarness.open()
     let state = ConversationState(repository: h.repo)
@@ -24,6 +29,8 @@ import XCTest
     try await h.close()
   }
 
+  // Готовит снимок и текст для заготовки без номера, затем ждёт запись. Проверяет, что файл, ввод
+  // и номер заготовки доступны до первого запроса.
   func testIdleNewDraftSavesTextAndPhotoBeforeAnyServerChatExists() async throws {
     let h = try await RepositoryHarness.open()
     try await h.store.perform { try NetworkSchema.install($0) }
@@ -63,6 +70,8 @@ import XCTest
     try await h.close()
   }
 
+  // Меняет только положение чтения и проверяет запись в базе. Черновик остаётся пустым, поэтому
+  // тест замечает зависимость записи от ввода.
   func testScrollingSavesLatestPositionWithoutEditingOrClosing() async throws {
     let h = try await RepositoryHarness.open()
     let state = ConversationState(repository: h.repo)
@@ -79,6 +88,8 @@ import XCTest
     try await h.close()
   }
 
+  // Задерживает запись ввода, меняет положение и ждёт её завершения. База должна сохранить новую
+  // точку, выбранную во время записи черновика.
   func testDraftWriteCannotOverwriteNewerReadingPosition() async throws {
     let h = try await RepositoryHarness.open()
     let state = ConversationState(repository: h.repo)
@@ -97,6 +108,8 @@ import XCTest
     try await h.close()
   }
 
+  // Сохраняет заготовку без номера, начинает новую и затем привязывает прежнюю. Проверяет, что
+  // прежний ввод попал в нужный чат, а новая заготовка осталась.
   func testUnboundDraftFlushPersistsBeforeChatAndOldBindingKeepsANewerDraft() async throws {
     let h = try await RepositoryHarness.open()
     try await h.store.perform { try NetworkSchema.install($0) }
@@ -136,6 +149,8 @@ import XCTest
     try await h.close()
   }
 
+  // Добавляет фото в заготовку без серверного чата, запускает уборку файлов и сверяет наличие
+  // исходника. Без учёта заготовки он мог бы быть удалён.
   func testUnboundSourceIsProtectedFromMediaRecovery() async throws {
     let h = try await RepositoryHarness.open()
     let media = MediaStore(store: h.store)
@@ -167,6 +182,8 @@ import XCTest
     try await h.close()
   }
 
+  // Передаёт корректный ход загрузки, неправильные числа, дубли и слишком большой список.
+  // Неверный пакет не затирает прежнее, а пустой список убирает завершённую передачу.
   func testSharedUploadSnapshotRejectsInvalidBoundsAndReplacesCompletedTransfers() async throws {
     let h = try await RepositoryHarness.open()
     let sync = NetworkSync(
@@ -179,6 +196,8 @@ import XCTest
       "id": UUID().uuidString, "deviceId": UUID().uuidString,
       "received": 250, "total": 1000, "mime": "image/jpeg",
     ]
+    // Собирает переданные строки в один ответ службы. Можно менять состав пакета, не меняя
+    // остальную форму данных.
     func packet(_ rows: [[String: Any]]) throws -> Data {
       try JSONSerialization.data(withJSONObject: ["type": "kandinsky.uploads", "uploads": rows])
     }
@@ -199,6 +218,8 @@ import XCTest
     try await h.close()
   }
 
+  // Проверяет отказ повтора заблокированного результата, один ожидающий повтор и тот же номер в
+  // новом состоянии. Новый номер запуска должен изменить номер повтора.
   func testRetrySurvivesLostReplyAndReopening() async throws {
     let harness = try await RepositoryHarness.open()
     let id = "11111111-2222-3333-4444-555555555555"
@@ -218,7 +239,8 @@ import XCTest
     try await harness.close()
   }
 
-  /// Отдельный обработчик применения параметров в этой проверке срабатывать не должен.
+  // Выбирает четыре результата и читает параметры сразу. Значение должно дойти до поля запроса до
+  // закрытия настроек.
   func testChoosingFourResultsAppliesBeforeClosingSettings() throws {
     var options = KandinskyOptions()
     let sheet = StudioGenerationSheet(options: options)
@@ -230,6 +252,8 @@ import XCTest
     sheet.showSettings(capabilities, onCountChange: { options.count = $0 }) { _ in
       XCTFail("The count must reach the composer before tapping Done")
     }
+    // Обходит вложенные области и ищет кнопку нужного количества. Смена внешнего контейнера не
+    // мешает проверить нажатие.
     func findCountControl(in view: UIView) -> UIControl? {
       if view.accessibilityIdentifier == "studio.option.Количество.4" { return view as? UIControl }
       return view.subviews.lazy.compactMap { findCountControl(in: $0) }.first
@@ -238,6 +262,8 @@ import XCTest
     count.sendActions(for: .touchUpInside)
     XCTAssertEqual(options.wire["count"] as? Int, 4)
   }
+  // Подменяет старую форму черновика и запускает уборку после сбоя. Проверяет целость исходников,
+  // порядок отправок, их номера и отдельный ввод.
   func testSelectionSurvivesLegacyDraftRewriteAndLegacyRecovery() async throws {
     var h = try await RepositoryHarness.open()
     let media = MediaStore(store: h.store)
@@ -343,6 +369,8 @@ import XCTest
     restoredMedia.close()
     try await h.close()
   }
+  // Теряет ответ передачи группы, вновь открывает базу и завершает те же команды. Сверяет число
+  // строк, подписи и номера, а также сохранение отдельного черновика.
   func testMediaBatchSurvivesLostReplyAndRestartWithoutConsumingComposerDraft() async throws {
     var h = try await RepositoryHarness.open()
     let media = MediaStore(store: h.store)
@@ -410,6 +438,9 @@ import XCTest
     await state.close()
     try await h.close()
   }
+  // Проверяет черновик после отказа и потери ответа, затем повторяет отправку с прежним номером.
+  // Успех очищает отправленный ввод, а следующий черновик и точка чтения переживают новое
+  // открытие.
   func testCommittedSendClearsDraftAndRestartPreservesIt() async throws {
     var h = try await RepositoryHarness.open()
     var state = ConversationState(repository: h.repo)
@@ -449,6 +480,8 @@ import XCTest
     await state.close()
     try await h.close()
   }
+  // Дописывает новый текст до ответа старой отправки. Проверяет, что новый ввод остаётся на
+  // экране и в базе после успеха прежней команды.
   func testNewestInputIsNotClearedByEarlierCommit() async throws {
     let h = try await RepositoryHarness.open()
     let state = ConversationState(repository: h.repo)
@@ -465,6 +498,8 @@ import XCTest
     await state.close()
     try await h.close()
   }
+  // Закрывает экран до того, как чтение старого черновика завершится. Повторное чтение базы
+  // проверяет, что пустое состояние его не заменило.
   func testLegacyDraftSurvivesCloseWhileOpenIsWaitingForSQLite() async throws {
     let h = try await RepositoryHarness.open()
     try await h.repo.saveDraft(chatID: 2, draft: Draft(text: "legacy draft", revision: 0))

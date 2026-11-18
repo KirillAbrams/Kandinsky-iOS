@@ -1,13 +1,18 @@
+// Проверяет очередь кадров при быстром потоке, смене источника и закрытии. Каждый лишний кадр
+// должен освободиться ровно один раз.
+
 import XCTest
 
 @testable import Kandinsky
 
-/// Сохраняет строку вызывающего места, чтобы отказ указывал на исходное ожидание.
+// Проверяет условие и передаёт строку места вызова. При отказе отчёт укажет на исходное ожидание.
 private func check(_ value: @autoclosure () -> Bool, _ line: Int = #line) {
   XCTAssertTrue(value(), "source assertion", line: UInt(line))
 }
 private typealias Frame = FrameProbe
 final class MediaSurfaceMailboxTests: XCTestCase {
+  // Быстро меняет привязки и передаёт тысячу кадров вручную. Сверяет одно уведомление, показ
+  // последнего, отказ старым кадрам и снятие кадра при закрытии.
   func testSourceOwnershipContract() {
     do {
       var queue: [() -> Void] = []
@@ -50,6 +55,8 @@ final class MediaSurfaceMailboxTests: XCTestCase {
     check(shown == -1 && current.closes == 1)
 
   }
+  // Сталкивает выдачу кадра в фоне и закрытие экрана в ста проходах. В любом порядке кадр
+  // освобождается один раз, без утечки и двойного закрытия.
   func testConcurrentOfferAndCloseReleaseExactlyOnce() {
     for _ in 0..<100 {
       var tasks: [() -> Void] = []

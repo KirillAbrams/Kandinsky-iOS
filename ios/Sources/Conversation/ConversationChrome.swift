@@ -1,8 +1,15 @@
+// Экран переписки на айфоне соединяет ленту, поле ввода и настройки генерации. Отправку и
+// сохранение черновика выполняет состояние переписки, а сборку истории и вывод фото берёт на себя
+// лента. Экран передаёт им нажатия, следит за готовностью истории и оставляет место для
+// клавиатуры, вложения и полосы загрузки.
+
 import UIKit
 
 @MainActor final class ConversationChrome: UIView {
   private weak var network: NetworkSync?
   private var networkTitle: String?, networkStatus: String?
+  // При новом состоянии связи обновляем заголовок и передаём событие загрузчику вложений. Возврат
+  // сети разрешает продолжить прерванную передачу, а при явном обрыве ставим её на паузу.
   func setNetworkStatus(_ text: String) {
     guard networkStatus != text else { return }
     networkStatus = text
@@ -13,6 +20,9 @@ import UIKit
       attachments?.pausePendingUpload()
     }
   }
+  // Подключаем обмен данными к экрану и загрузчику вложений. У сохранённого чата передаём на
+  // сервер место чтения и ищем заголовок среди местных записей. У черновика без номера пока нет
+  // истории, которую можно привязать к серверу.
   func configureNetwork(_ sync: NetworkSync?) {
     network = sync
     attachments?.network = sync
@@ -30,6 +40,8 @@ import UIKit
   }
   private var onViewport: ((ReadingAnchor) -> Void)?
 
+  // При появлении экрана в окне даём загрузчику поднять оставшуюся передачу. Снятие экрана с окна
+  // само по себе новую загрузку не начинает.
   override func didMoveToWindow() {
     super.didMoveToWindow()
     if window != nil { attachments?.resumePendingUpload() }
@@ -42,7 +54,8 @@ import UIKit
   private var activeGenerationID: MessageID?
   private var generationLookup: Task<Void, Never>?
 
-  // Поздний ответ о задании может прийти после перехода в другой чат.
+  // Читаем номер активного задания и обновляем кнопку остановки. Отменяем предыдущий запрос,
+  // чтобы его поздний ответ не вернул на кнопку номер уже завершённой генерации.
   private func refreshActiveGeneration() {
     guard chatID > 0, let network else { return }
     generationLookup?.cancel()
@@ -59,6 +72,9 @@ import UIKit
     }
   }
 
+  // Собираем вид и доступность кнопки из готовности истории, черновика и активного задания.
+  // Остановку разрешаем во время задания, а обычную отправку блокируем при занятом поле или ещё
+  // не готовом вложении. Подпись для озвучивания различает запуск, повтор и остановку.
   private func updateSendButton() {
     guard let state else { return }
     let stopping = activeGenerationID != nil
@@ -86,6 +102,9 @@ import UIKit
   private var localTransferProgress: Double?
   var prepareSourceDraft: (() async throws -> Void)?
 
+  // Показываем передачу с этого телефона, если она есть. Иначе считаем общий процент по сумме
+  // принятых и ожидаемых байтов с других устройств, чтобы маленький и большой файлы не получили
+  // одинаковый вес.
   private func updateStudioTransferProgress() {
     let remote = network?.studioTransfers.filter { $0.deviceId != network?.profile.deviceId } ?? []
     let remoteProgress =
@@ -109,9 +128,11 @@ import UIKit
   var onNewChat: (() -> Void)?
   var onFirstSend: ((KandinskyOptions) -> Void)?
   private(set) var isStartingThread = false
+  // Поле в фокусе, правка текста или первый запрос означают, что человек уже занялся черновиком.
   var studioDraftTouched: Bool {
     input.isFirstResponder || (state?.draft.revision ?? 0) > 0 || isStartingThread
   }
+  // Переносим только настройки, пригодные для другого запроса. Улучшение остаётся связано с текущим файлом.
   var generationOptions: KandinskyOptions {
     if options.model == "video_sr" { return KandinskyOptions() }
     var value = options
@@ -119,6 +140,8 @@ import UIKit
     return value
   }
 
+  // Возвращаем настройки из черновика и меняем подпись модели. На время восстановления выключаем
+  // обратную запись, иначе изменение на экране снова запустило бы обновление черновика.
   func restoreGenerationOptions(_ value: KandinskyOptions) {
     restoringGenerationOptions = true
     defer { restoringGenerationOptions = false }
@@ -127,11 +150,14 @@ import UIKit
       ? "Улучшение видео" : value.model == "video" ? "Video Lite" : "Image Lite"
     options = value
   }
-  // Сервер создаст чат после первого запроса. До этого черновик уже доступен.
+  // Разрешаем ввод до создания серверного чата и передаём сохранённый черновик в состояние. Без
+  // этого новый экран ожидал бы историю, которой ещё нет.
   func openStudioDraft(_ restored: Draft? = nil) {
     historyReady = true
     state?.openStudioDraft(restored)
   }
+  // Отмечаем, что идёт первый запрос на создание чата, и сразу обновляем доступность кнопок. Пока
+  // сервер выдаёт номер, повторное нажатие не должно запустить второй переход.
   func setStartingThread(_ value: Bool) {
     isStartingThread = value
     state?.onChange?()
@@ -150,6 +176,8 @@ import UIKit
   private var modelName = "Image Lite"
   private var restoringGenerationOptions = false
   private var options = KandinskyOptions() {
+    // Собираем подпись модели с числом результатов. Сохраняем выбор, сделанный человеком, а при
+    // восстановлении уже сохранённого значения второй записи не требуется.
     didSet {
       let count = options.count ?? 1
       modelLabel.text = count > 1 ? "\(modelName) · \(count)" : modelName
@@ -165,6 +193,9 @@ import UIKit
   private let placeholder = UILabel()
   private var body = CGRect.zero, card = CGRect.zero, composer = CGRect.zero
   private var wallpaperBounds = CGRect.null
+  // Собираем кнопки, поле ввода и ленту. Подключаем сохранение черновика, выбор исходного файла,
+  // видимый ход загрузки и остановку активного задания. Перед отправкой завершаем ввод с
+  // клавиатуры, чтобы в запрос попали ещё набираемые символы.
   init(
     chatID: ChatID, state: ConversationState? = nil, media: MediaStore? = nil,
     admission: MediaAdmission? = nil, playback: MediaCoordinator? = nil,
@@ -409,6 +440,7 @@ import UIKit
       }
     }
   }
+  // Пустой запрос не отправляем, но оставляем путь повтора для уже сохранённой попытки.
   private var canSubmitDraft: Bool {
     guard let draft = state?.draft else { return false }
     return draft.pendingSend != nil || draft.pendingMediaBatch != nil
@@ -416,6 +448,8 @@ import UIKit
       || !draft.attachmentDrafts.isEmpty
   }
 
+  // Показываем модели обычной генерации. После выбора оставляем исходный файл только для
+  // совместимого режима, иначе старое вложение могло бы уйти в запрос с другой моделью.
   private func chooseGenerationOptions() {
     withModels { [weak self] models, presenter in
       guard let self else { return }
@@ -436,12 +470,15 @@ import UIKit
     }
   }
 
+  // Ищем ближайшего владельца экрана, который может показать панель поверх переписки.
   private var presenter: UIViewController? {
     var responder: UIResponder? = self
     while let current = responder, !(current is UIViewController) { responder = current.next }
     return responder as? UIViewController
   }
 
+  // Ищем возможности выбранной модели и отдельно учитываем исходный файл. Число результатов
+  // сохраняем сразу при выборе, а остальные настройки получаем из подтверждённой формы.
   private func showGenerationSettings() {
     withModels { [weak self] models, presenter in
       guard let self, let model = models.first(where: { $0.id == self.options.model }) else {
@@ -462,6 +499,9 @@ import UIKit
     }
   }
 
+  // Повторно используем загруженный список и держим только один запрос за раз. После ответа
+  // проверяем, что переписка ещё видна и поверх неё не открыто другое окно. Так список не
+  // появится поверх чужого экрана.
   private func withModels(_ present: @escaping ([StudioModel], UIViewController) -> Void) {
     guard !loadingModels, let presenter, presenter.presentedViewController == nil else { return }
     input.resignFirstResponder()
@@ -490,7 +530,12 @@ import UIKit
     }
   }
 
+  // Убираем подписку на движения клавиатуры при уничтожении экрана. Дальнейшие системные события
+  // этому экземпляру переписки уже не нужны.
   deinit { if let keyboardObserver { NotificationCenter.default.removeObserver(keyboardObserver) } }
+  // Соединяем действия над сообщениями с местным хранилищем и, при подключении, с сервером.
+  // Восстанавливаем позицию, готовим первый видимый кадр и только затем разрешаем ввод. Иначе
+  // экран мог бы принять запрос до готовности переписки.
   func openHistory(repository: ChatRepository, anchor: ReadingAnchor?) async throws {
     if let state {
       let ui = ConversationUIController(
@@ -544,6 +589,8 @@ import UIKit
     setNeedsLayout()
     setNeedsDisplay()
   }
+  // Передаём ленте новые и изменённые строки. Когда обновление касается активного задания,
+  // перечитываем его состояние для кнопки остановки. Скрытый чат закрываем обратно в список.
   func apply(_ delta: MessageDelta) {
     timeline.apply(delta)
     if delta.chat.id == chatID, network != nil {
@@ -557,30 +604,45 @@ import UIKit
     }
     if delta.chat.hidden { onBack() }
   }
+  // Передаём ленте видимость вложений при смене экрана. Лента по этому признаку решает, какие
+  // фото и видео сейчас стоит готовить.
   func setMediaVisible(_ visible: Bool) { timeline.setMediaVisible(visible) }
+  // При открытии списка переписок закрываем клавиатуру и останавливаем движущиеся вложения под
+  // ним. После закрытия списка снова разрешаем воспроизведение.
   func setHistoryDrawerVisible(_ visible: Bool) {
     if visible { input.resignFirstResponder() }
     timeline.setMovingMediaVisible(!visible)
   }
+  // Просим владельца камеры закончить съёмку. Тогда после ухода со страницы камера не останется
+  // занята этим окном.
   func stopCapture() { attachments?.stopCapture() }
-  // Сохраняем место чтения до того, как история уйдёт с экрана.
+  // Перед переходом останавливаем камеру, завершаем ввод и ставим ленту на паузу. Снимаем место
+  // чтения до закрытия области, пока оно соответствует экрану.
   func prepareForNavigation() {
     stopCapture()
     input.resignFirstResponder()
     timeline.pauseForNavigation()
     state?.anchor = timeline.readingAnchor()
   }
+  // Заканчиваем работу загрузчика и задачи поиска генерации, запоминаем место чтения и закрываем
+  // ленту. У пустого местного чата без номера можно убрать неприкреплённый черновик.
   func persistAnchorAndClose() {
     attachments?.close(discardDraft: network == nil && chatID == 0 && state?.chatID == nil)
     generationLookup?.cancel()
     state?.anchor = timeline.readingAnchor()
     timeline.close()
   }
+  // Добавляем к кнопке понятную подсказку для повтора сохранения и озвучиваем её. После ошибки
+  // человек может повторить действие с той же кнопки.
   func showError(_ error: Error) {
     send.accessibilityHint = "Не удалось сохранить. Нажмите ещё раз для повтора."
     UIAccessibility.post(notification: .announcement, argument: send.accessibilityHint)
   }
+  // Запрещаем создание из файла разметки. Рабочему экрану нужны номер переписки и обработчики,
+  // которые передаются при создании из приложения.
   required init?(coder: NSCoder) { fatalError("Use programmatic initializer") }
+  // При смене системного размера шрифта обновляем поле и подсказку, затем заново измеряем экран.
+  // Для остальных смен оформления прежних размеров достаточно.
   override func traitCollectionDidChange(_ previous: UITraitCollection?) {
     super.traitCollectionDidChange(previous)
     if previous?.preferredContentSizeCategory != traitCollection.preferredContentSizeCategory {
@@ -590,6 +652,9 @@ import UIKit
       setNeedsLayout()
     }
   }
+  // Раскладываем заголовок, историю и ввод между системными отступами и клавиатурой. Передаём
+  // ленте запас под панели и используем те же прямоугольники для озвучиваемых кнопок. Тогда
+  // последние строки и подписи остаются доступными при открытом вложении и полосе загрузки.
   override func layoutSubviews() {
     super.layoutSubviews()
     let previousCard = card
@@ -701,6 +766,8 @@ import UIKit
       setNeedsDisplay()
     }
   }
+  // Рисуем белый фон и узор только в пределах истории. Для пустой переписки добавляем приглашение
+  // к первой генерации, которое исчезает после появления строк.
   override func draw(_ rect: CGRect) {
     UIColor.white.setFill()
     UIRectFill(bounds)
@@ -719,6 +786,8 @@ import UIKit
 
 }
 extension ConversationChrome: UITextViewDelegate {
+  // Скрываем подсказку при вводе и передаём набранный текст в состояние черновика. На имитаторе
+  // также обновляем отображение значков, прежде чем показать итоговый текст.
   func textViewDidChange(_ textView: UITextView) {
     #if targetEnvironment(simulator)
       PlatformTextFont.updateEmoji(in: textView)
@@ -732,6 +801,8 @@ extension ConversationChrome: UITextViewDelegate {
 }
 
 extension ConversationChrome {
+  // Показываем и озвучиваем временную плашку с причиной ошибки файла. При отсроченном закрытии
+  // сверяем саму плашку, чтобы старый срок не убрал новое сообщение.
   private func showStudioAttachmentError(_ title: String) {
     guard window != nil else { return }
     studioFeedback?.panel.removeFromSuperview()
@@ -767,17 +838,23 @@ extension ConversationChrome {
 
 @MainActor private final class StudioTransferBar: UIView {
   var title = "Загрузка файла" {
+    // Меняем озвучиваемое название полосы и запрашиваем перерисовку. Это различает передачу с
+    // этого телефона и с другого устройства.
     didSet {
       accessibilityLabel = title
       setNeedsDisplay()
     }
   }
   var progress: Double = 0 {
+    // Переводим долю передачи в проценты для озвучивания и перерисовываем заполнение полосы.
+    // Тогда голосовая подсказка меняется вместе с видимым ходом.
     didSet {
       accessibilityValue = "\(Int(progress*100))%"
       setNeedsDisplay()
     }
   }
+  // Создаём полосу загрузки как отдельный озвучиваемый элемент. Её значение часто меняется,
+  // поэтому отмечаем это при настройке доступности.
   init() {
     super.init(frame: .zero)
     isOpaque = false
@@ -786,7 +863,11 @@ extension ConversationChrome {
     accessibilityLabel = "Загрузка файла"
     accessibilityTraits = [.updatesFrequently]
   }
+  // Полоса создаётся программно с настроенной подписью и озвучиванием. Создание из сохранённой
+  // разметки для неё не предусмотрено.
   required init?(coder: NSCoder) { fatalError("Use programmatic initializer") }
+  // Рисуем подпись с процентом и закрашиваем переданную долю. По незаполненной части видно, сколько
+  // ещё осталось передать.
   override func draw(_ rect: CGRect) {
     let text = "\(title): \(Int(progress * 100))%"
     (text as NSString).draw(
@@ -806,6 +887,8 @@ extension ConversationChrome {
   private let photo = UIImage(named: "KandinskyAttachmentPhoto")
   private let video = UIImage(named: "KandinskyRecentVideo")
   var isVideo = false {
+    // При смене вида вложения правим подпись кнопки удаления и перерисовываем ярлык. Одинаковое
+    // значение оставляет готовый рисунок.
     didSet {
       guard isVideo != oldValue else { return }
       remove.accessibilityLabel = isVideo ? "Удалить исходное видео" : "Удалить исходное фото"
@@ -813,21 +896,30 @@ extension ConversationChrome {
     }
   }
   let remove = UIButton(type: .custom)
+  // Создаём ярлык исходного файла с настоящей кнопкой удаления поверх рисунка. Тогда крестик
+  // можно нажать и найти через средства доступности.
   override init(frame: CGRect) {
     super.init(frame: frame)
     isOpaque = false
     addSubview(remove)
   }
+  // Ярлык строится программно вместе с кнопкой удаления. Загрузка из файла разметки миновала бы
+  // эту настройку.
   required init?(coder: NSCoder) { fatalError("Use programmatic initializer") }
+  // Отводим правый край ярлыка под область нажатия на крестик. Подпись слева остаётся обычной
+  // частью рисунка.
   override func layoutSubviews() {
     super.layoutSubviews()
     // Согласованное оформление отдаёт правую полосу шириной тридцать шесть единиц удалению
     remove.frame = CGRect(x: 70, y: 0, width: 36, height: bounds.height)
   }
-  // Нажатие на подпись фото сохраняет его в черновике. Удаляет только крестик.
+  // Передаём ярлыку касания внутри крестика. Нажатие на название вложения поэтому оставляет файл
+  // в черновике.
   override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
     remove.frame.contains(point)
   }
+  // Рисуем рамку, подпись и крестик, а значок берём по виду исходного файла. Пользователь видит,
+  // какое вложение лежит в черновике и где его убрать.
   override func draw(_ rect: CGRect) {
     let outline = UIBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 5.5), cornerRadius: 8)
     UIColor.white.setFill()

@@ -1,3 +1,6 @@
+// Делит список чатов на закреплённые и календарные группы. По этим группам панель строит
+// заголовки и порядок строк.
+
 import Foundation
 
 struct StudioHistorySection {
@@ -6,6 +9,8 @@ struct StudioHistorySection {
 }
 
 enum StudioHistorySections {
+  // Находит начало сегодня и вчера по календарю телефона, сортирует чаты по активности и номеру и
+  // убирает пустые группы. Так день перевода часов и совпадение времени не ломают порядок.
   static func make(_ rows: [StudioThread], now: Date = Date(), calendar: Calendar = .current)
     -> [StudioHistorySection]
   {

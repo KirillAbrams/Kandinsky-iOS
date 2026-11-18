@@ -1,3 +1,6 @@
+// Проверяет место на диске, повторное чтение файлов и отказ от устаревших ссылок. Местные
+// сценарии используют временные папки, сохранённые материалы и управляемые сетевые ответы.
+
 import XCTest
 import Foundation
 import CryptoKit
@@ -6,6 +9,8 @@ import CryptoKit
 private final class DownloadCounter: @unchecked Sendable {
   private let lock = NSLock()
   private var count = 0
+  // Увеличивает счётчик под блокировкой. Проверка может принять несколько завершений из фоновых
+  // потоков без потери числа.
   func completed() {
     lock.lock()
     count += 1
@@ -25,6 +30,8 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
     defer { gate.unlock() }
     return scans
   }
+  // Считает просмотр папки и затем выполняет обычное чтение списка. Это отличает сохранённый учёт
+  // места от повторного просмотра всего диска.
   override func contentsOfDirectory(
     at url: URL, includingPropertiesForKeys keys: [URLResourceKey]?,
     options mask: FileManager.DirectoryEnumerationOptions = []
@@ -43,6 +50,8 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
   private struct CacheWorkingSet: Decodable {
     let chatId: Int, previews: [CacheRecord], pressureOriginals: [CacheRecord]
   }
+  // Читает список использованных миниатюр и сверяет количество, разные номера, контрольные суммы
+  // и общий размер. Подмена маленьким набором не смогла бы проверить реальный предел.
   private func workingSet() throws -> CacheWorkingSet {
     let root = try XCTUnwrap(
       Bundle(for: RepositoryHarness.self).url(forResource: "fixtures", withExtension: nil))
@@ -56,6 +65,8 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
     XCTAssertEqual(value.previews.reduce(0) { $0 + $1.byteSize }, 77_301_963)
     return value
   }
+  // Находит созданный приложением подсчёт для оригиналов или миниатюр. Так проверяются настоящие
+  // настройки, включая прежний вариант общего предела.
   private func defaultBudget(_ remote: NetworkMedia, preview: Bool) throws -> NetworkDiskBudget {
     let fields = Mirror(reflecting: remote).children
     // Читает настроенный рабочий ограничитель, включая прежний общий вариант
@@ -65,6 +76,8 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
         ?? fields.first { $0.label == "diskBudget" }) : fields.first { $0.label == "diskBudget" }
     return try XCTUnwrap(field?.value as? NetworkDiskBudget)
   }
+  // Проходит список файлов, создаёт недостающие и обновляет время у сохранённых. Возвращает число
+  // промахов, чтобы следующий проход показал, что пришлось готовить заново.
   private func replay(
     _ records: [CacheRecord], root: URL, directory: String, budget: NetworkDiskBudget, epoch: Int
   ) throws -> Int {
@@ -89,6 +102,8 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
     return misses
   }
   /// Второй проход не должен терять файлы из-за недостаточного объёма области подложек.
+  // Проходит набор из двух тысяч восьмисот миниатюр дважды. Второй проход должен найти
+  // сохранённые файлы, иначе обычная прокрутка по кругу повторяла бы загрузку.
   func testPublishedPreviewWorkingSetSurvivesASecondDiskPass() async throws {
     let h = try await RepositoryHarness.open()
     defer { try? FileManager.default.removeItem(at: h.root) }
@@ -109,6 +124,8 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
       "Published previews must survive a complete repeated pass without original downloads")
     try await h.close()
   }
+  // Заполняет папку миниатюр и создаёт избыток крупных оригиналов. Очистка оригиналов уменьшает
+  // их размер, но все просмотренные миниатюры остаются.
   func testOriginalDiskPressureDoesNotEvictPublishedPreviews() async throws {
     let h = try await RepositoryHarness.open()
     defer { try? FileManager.default.removeItem(at: h.root) }
@@ -146,6 +163,8 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
     try await h.close()
   }
   /// Очистка подложек не должна удалить оригинал другой области.
+  // Превышает предел миниатюр и проверяет уборку до меньшего объёма. Контрольный оригинал в
+  // соседней папке остаётся на диске.
   func testDefaultPreviewOverflowTrimsOnlyItsOwnDirectory() async throws {
     let h = try await RepositoryHarness.open()
     defer { try? FileManager.default.removeItem(at: h.root) }
@@ -174,6 +193,8 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
       "Preview pressure must not touch the original domain")
     try await h.close()
   }
+  // Оставляет лишний объём после появления оригинала и запрашивает готовую миниатюру. Она
+  // читается без сети, а накопленная уборка оригиналов успевает пройти.
   func testCachedPreviewServicesPendingOriginalPromotionCleanup() async throws {
     let h = try await RepositoryHarness.open()
     defer { try? FileManager.default.removeItem(at: h.root) }
@@ -214,6 +235,8 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
     request.cancel()
     try await h.close()
   }
+  // Удерживает право сетевой загрузки в другом потоке и запускает местное чтение. Проверяет, что
+  // чтение закончилось ещё до освобождения блокировки.
   private func whileDownloadGateIsHeld<T: Sendable>(
     _ remote: NetworkMedia, body: @escaping @Sendable () throws -> T
   ) async throws -> (Result<T, Error>, Double) {
@@ -245,6 +268,8 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
       observed.2, "The cached read must finish while an unrelated download still holds its lock")
     return (observed.0, observed.1)
   }
+  // Читает настоящую картинку и проверяет её отпечаток. Затем кладёт её на путь оригинала или
+  // миниатюры, чтобы одинаковые байты проверять двумя способами.
   private func gateFixture(_ h: RepositoryHarness, preview: Bool) throws -> (Attachment, URL, Data)
   {
     let folder = try XCTUnwrap(
@@ -278,14 +303,20 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
     try data.write(to: file)
     return (attachment, file, data)
   }
+  // Запрашивает настоящую местную миниатюру, пока другая загрузка удерживает свою блокировку.
+  // Картинка должна открыться сразу из файла.
   func testRealCachedPreviewDoesNotWaitForAnUnrelatedDownloadGate() async throws {
     try await assertCachedFileBypassesDownloadGate(preview: true)
   }
 
+  // Проверяет тот же порядок для сохранённого оригинала. Готовому файлу не нужно ждать чужой
+  // сетевой запрос.
   func testRealCachedOriginalDoesNotWaitForAnUnrelatedDownloadGate() async throws {
     try await assertCachedFileBypassesDownloadGate(preview: false)
   }
 
+  // Готовит выбранный файл, удерживает загрузку и сверяет путь, тип и байты быстрого ответа.
+  // Счётчик сети остаётся пустым.
   private func assertCachedFileBypassesDownloadGate(preview: Bool) async throws {
     let h = try await RepositoryHarness.open()
     defer { try? FileManager.default.removeItem(at: h.root) }
@@ -306,6 +337,8 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
     try await h.close()
   }
 
+  // Отменяет запрос заранее, пока чужая загрузка занята. Отказ должен прийти без ожидания права
+  // загрузки и без сети.
   func testPreCancelledResolveDoesNotWaitForAnUnrelatedDownloadGate() async throws {
     let h = try await RepositoryHarness.open()
     defer { try? FileManager.default.removeItem(at: h.root) }
@@ -326,6 +359,8 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
     try await h.close()
   }
   /// Пока запрос открыт, его файл должен пережить очистку других записей.
+  // Читает сохранённый файл и вызывает уборку во время чтения. Отдельно завершает, отменяет и
+  // освобождает запрос, после чего уборка должна снова иметь возможность удалить этот файл.
   func testCachedReadRemainsPinnedUntilTokenFinishCancelOrDeallocation() async throws {
     for end in ["finish", "cancel", "deallocate"] {
       let h = try await RepositoryHarness.open(), fm = FileManager.default
@@ -349,6 +384,8 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
       }
       var token: MediaCancellation? = MediaCancellation()
       weak var weakToken = token
+      // Запрашивает файл из фоновой работы с переданной отменой. Так проверка может удерживать
+      // одну копию и в это время принимать другие.
       func read(_ asset: Attachment, _ request: MediaCancellation) async throws -> (URL, String) {
         try await Task.detached { try remote.resolve(asset, preview: true, token: request) }.value
       }
@@ -393,6 +430,8 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
       try await h.close()
     }
   }
+  // Занимает очередь базы и запрашивает миниатюру по уже известному описанию вложения. Ответ
+  // должен успеть без ожидания очереди и без сети.
   func testCachedPreviewReturnsWhileSQLiteWorkerIsBusy() async throws {
     let h = try await RepositoryHarness.open(), fm = FileManager.default
     defer { try? fm.removeItem(at: h.root) }
@@ -472,6 +511,8 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
     XCTAssertEqual(counter.value, 0)
     try await h.close()
   }
+  // Открывает миниатюру по готовым сведениям и удерживает другие файлы. Даже под давлением места
+  // выбранные байты остаются доступны.
   func testCachedDescriptorPreviewRemainsProtectedWhenOtherFilesArePinned() async throws {
     let h = try await RepositoryHarness.open(), fm = FileManager.default
     defer { try? fm.removeItem(at: h.root) }
@@ -518,6 +559,8 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
     pins.forEach { $0.close() }
     try await h.close()
   }
+  // Читает старое вложение без сетевого описания, затем записывает и снова читает новое. Это
+  // сохраняет совместимость с историей, которая уже лежит в телефоне.
   func testLegacyAttachmentJSONAndLocationRoundtrip() throws {
     let blob = String(repeating: "a", count: 32)
     let old = """
@@ -534,6 +577,8 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
       "Both32and64character immutable blob IDs are supported")
     XCTAssertEqual(try JSONDecoder().decode(Attachment.self, from: JSONEncoder().encode(a)), a)
   }
+  // Подставляет несовпадающее описание и проверяет возврат к сведениям из базы. Отмена всё ещё
+  // останавливает поиск, чтобы неверная подсказка не обошла проверку.
   func testInvalidSnapshotLocationUsesAuthoritativeFallbackAndHonoursCancel() async throws {
     let h = try await RepositoryHarness.open()
     defer { try? FileManager.default.removeItem(at: h.root) }
@@ -569,6 +614,8 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
     )
     try await h.close()
   }
+  // Даёт миниатюре путь через ссылку на внешний контрольный файл. Поиск должен отказать до сети и
+  // просмотра папки, оставив внешние байты без изменений.
   func testSnapshotPreviewCannotReadAnOutsideFileAlias() async throws {
     let h = try await RepositoryHarness.open(), fm = FileManager.default
     defer { try? fm.removeItem(at: h.root) }
@@ -603,6 +650,8 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
     try await h.close()
   }
   /// Контрольный внешний исходник не должен измениться.
+  // Проверяет, что поиск готового оригинала не открывает ссылку на чужой файл. Отказ происходит
+  // без сети и не меняет контрольное содержимое.
   func testDirectResolverRejectsCachedOriginalOutsideFileAlias() async throws {
     let h = try await RepositoryHarness.open(), fm = FileManager.default
     defer { try? fm.removeItem(at: h.root) }
@@ -629,6 +678,8 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
     XCTAssertEqual(try Data(contentsOf: fixture), before)
     try await h.close()
   }
+  // Подставляет старое имя без расширения рядом с внешним файлом и проверяет отказ до переноса.
+  // Ни нового имени, ни изменений во внешних байтах не появляется.
   func testDirectResolverRejectsOutsideLegacyAliasBeforeRenaming() async throws {
     let h = try await RepositoryHarness.open(), fm = FileManager.default
     defer { try? fm.removeItem(at: h.root) }
@@ -661,6 +712,8 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
     XCTAssertEqual(try Data(contentsOf: fixture), before)
     try await h.close()
   }
+  // Открывает через поставщика настоящую сохранённую миниатюру и сверяет размер и номер запроса.
+  // После закрытия память освобождается, а диск и счётчик сети остаются прежними.
   func testSelectedProviderDecodesRealCachedPreviewAndReleasesIt() async throws {
     let h = try await RepositoryHarness.open(), fm = FileManager.default
     defer { try? fm.removeItem(at: h.root) }
@@ -712,6 +765,8 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
     XCTAssertEqual(media.bytesUsed, 0)
     try await h.close()
   }
+  // Создаёт временный файл нужной длины и задаёт время использования без наполнения всеми
+  // байтами. Это позволяет быстро испытать большой набор и известный порядок уборки.
   private func sparse(_ root: URL, _ relative: String, _ size: Int, _ age: TimeInterval = 100)
     throws -> URL
   {
@@ -726,6 +781,8 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
       [.modificationDate: Date(timeIntervalSince1970: age)], ofItemAtPath: file.path)
     return file
   }
+  // Считает размеры файлов в папках оригиналов и миниатюр напрямую. Результат независим от
+  // сохранённого подсчёта приложения.
   private func cachedBytes(_ root: URL) throws -> Int {
     try ["remote", "previews"].flatMap { name in
       try FileManager.default.contentsOfDirectory(
@@ -734,6 +791,8 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
       total + (try file.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)
     }
   }
+  // Записывает связь оригинала и миниатюры в пробную базу и возвращает соответствующее вложение.
+  // Дальше можно проверять чтение без запроса к серверу.
   private func warmPreview(_ h: RepositoryHarness) async throws -> Attachment {
     let blob = String(repeating: "a", count: 32), preview = String(repeating: "b", count: 32)
     try await h.store.perform { db in
@@ -747,6 +806,8 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
       mime: "image/jpeg", byteSize: 1024, rawWidth: 64, rawHeight: 64, orientation: 1,
       durationMs: nil, thumbnailKey: "")
   }
+  // Несколько раз читает готовую картинку и сверяет только первый просмотр папок. Повтор должен
+  // обновлять время использования, не запуская новую сеть.
   func testWarmPreviewDoesNotEnumerateTheCacheAgain() async throws {
     let h = try await RepositoryHarness.open()
     defer { try? FileManager.default.removeItem(at: h.root) }
@@ -771,6 +832,8 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
     XCTAssertGreaterThan(modified, Date(timeIntervalSince1970: 100))
     try await h.close()
   }
+  // Превышает предел старыми файлами и проверяет уборку с запасом. Защищённый оригинал, текущий
+  // результат и местное вложение остаются.
   func testEvictionLeavesHeadroomAndPreservesPinnedOriginal() async throws {
     let h = try await RepositoryHarness.open()
     defer { try? FileManager.default.removeItem(at: h.root) }
@@ -802,6 +865,8 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
     source.close()
     try await h.close()
   }
+  // Добавляет несколько небольших файлов под пределом и сверяет точный объём. Новые байты
+  // учитываются без повторного обхода папок.
   func testSmallAdmissionsDoNotRepeatDirectoryAudit() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
@@ -820,6 +885,8 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
       fm.enumerations, 2, "Known small writes below the quota must use size accounting")
     XCTAssertEqual(try cachedBytes(root), 100 + 16 * 1024)
   }
+  // Доводит сохранённый объём до предела и добавляет ещё один файл. Проверяет новый обход, уборку
+  // с запасом и сохранность принятого файла.
   func testKnownGrowthCrossingQuotaTriggersAnAccurateAudit() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
@@ -841,6 +908,8 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
     XCTAssertTrue(FileManager.default.fileExists(atPath: newest.path))
   }
   /// Отказ поиска не меняет файлы и не должен сбрасывать уже выполненную сверку объёма.
+  // Вызывает ошибку поиска, которая ничего не записывает, и затем снова читает готовый файл.
+  // Прежний проверенный объём остаётся пригодным, поэтому повторного обхода нет.
   func testFailedLookupDoesNotForgetAnUnchangedWarmCache() async throws {
     let h = try await RepositoryHarness.open()
     defer { try? FileManager.default.removeItem(at: h.root) }
@@ -871,6 +940,8 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
       fm.enumerations, 2, "A failed lookup changed no files and must not force a directory audit")
     try await h.close()
   }
+  // Добавляет завершённые оригиналы к известному объёму без нового обхода. Когда они пересекают
+  // предел, очистка снова сверяет реальные файлы.
   func testKnownPromotionsKeepAccurateSizeWithoutRepeatedAudits() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
@@ -896,6 +967,8 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
     XCTAssertLessThanOrEqual(try cachedBytes(root), 64 * 1024 * 1024)
     XCTAssertEqual(fm.enumerations, 4, "Crossing the quota must still force an accurate audit")
   }
+  // Превышает предел защищёнными файлами и проверяет, что чтение не теряет их. После освобождения
+  // уборка должна повториться и уменьшить объём.
   func testPinnedOverflowRemainsUsableAndRetriesAfterRelease() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
@@ -916,6 +989,8 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
     XCTAssertEqual(try cachedBytes(root), 40 * 1024 * 1024)
     XCTAssertFalse(FileManager.default.fileExists(atPath: first.path))
   }
+  // Вызывает ошибку удаления посередине уборки. Следующая попытка заново сверяет место и
+  // освобождает его, не полагаясь на неполный итог.
   func testRemovalFailureRequiresANewAuditBeforeTrustingTheTotal() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
@@ -931,6 +1006,8 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
     XCTAssertEqual(fm.enumerations, 4)
     XCTAssertTrue(FileManager.default.fileExists(atPath: keep.path))
   }
+  // Передаёт уже отменённый запрос и проверяет отказ до чтения папки и обращения к сети. Иначе
+  // закрытый экран продолжал бы лишнюю работу.
   func testPreCancelledResolveDoesNotScanOrStartHTTP() async throws {
     let h = try await RepositoryHarness.open()
     defer { try? FileManager.default.removeItem(at: h.root) }
@@ -951,6 +1028,8 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
     try await h.close()
   }
   /// Одновременно запускает много чтений одного готового файла.
+  // Запускает много чтений сохранённого файла одновременно. Они получают тот же путь и делят один
+  // проход по папкам вместо отдельной проверки для каждого.
   func testConcurrentWarmResolvesShareOneDirectoryAudit() async throws {
     let h = try await RepositoryHarness.open()
     defer { try? FileManager.default.removeItem(at: h.root) }
@@ -969,6 +1048,8 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
     XCTAssertEqual(fm.enumerations, 2)
     try await h.close()
   }
+  // Собирает проверенный оригинал из частей и считает извещения об этом. Появившийся объём влияет
+  // на уборку один раз, повторное чтение не начисляет его снова.
   func testVerifiedRangePromotionInvalidatesBudgetExactlyOnce() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
@@ -1005,6 +1086,8 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
     XCTAssertEqual(try Data(contentsOf: original), bytes)
     range.close()
   }
+  // Подставляет испорченные байты части и ждёт отказа. Ни целый файл, ни сигнал подсчёту не
+  // должны появиться.
   func testCorruptRangeNeverAnnouncesAPromotedOriginal() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
@@ -1019,6 +1102,8 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
     XCTAssertFalse(FileManager.default.fileExists(atPath: original.path))
     range.close()
   }
+  // Сначала сохраняет проверенный полный объём, затем скачивает новый файл. Его фактический
+  // размер должен вызвать повторную сверку и уборку, а готовая миниатюра остаётся местной.
   func testActualDownloadedBytesCannotBypassAnAlreadyAuditedQuota() async throws {
     let profile = try StudioTestServer.profile()
     let lookup = NetworkAPI(profile: profile)
@@ -1069,6 +1154,8 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
     XCTAssertEqual(counter.value, 1, "Only the new original needs HTTP; the warm preview is local")
     try await h.close()
   }
+  // Готовит оригинал, кадр и части одного вложения и отдельный файл другого. После удаления
+  // исчезают все копии нужного, другое вложение остаётся, новый поиск отозванного закрывается.
   func testStudioRemovalEvictsOriginalPosterAndRangesWithoutTouchingAnotherBlob() async throws {
     let h = try await RepositoryHarness.open()
     let api = NetworkAPI(profile: nil), remote = NetworkMedia(store: h.store, api: api)
@@ -1103,6 +1190,8 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
     } catch { XCTAssertEqual(error as? MediaError, .cancelled) }
     try await h.close()
   }
+  // Читает местный оригинал и сравнивает байты и время использования. Сеть не вызывается, новая
+  // отметка защищает недавно прочитанное от ранней уборки.
   func testDiskHitWorksWithoutNetworkAndRefreshesLastUse() async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -1121,6 +1210,8 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
       file.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)
     XCTAssertGreaterThan(used, old, "A disk cache hit must refresh eviction recency")
   }
+  // Открывает одно вложение двумя запросами и ждёт общую загрузку. После освобождения памяти файл
+  // остаётся, новый запрос читает его без повторной передачи.
   func testConcurrentRemoteOpensDownloadOnceAndKeepFileAfterRamClear() async throws {
     let profile = try StudioTestServer.profile()
     let lookup = NetworkAPI(profile: profile)
@@ -1180,6 +1271,8 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
     XCTAssertEqual(counter.value, before)
     try await h.close()
   }
+  // При наличии проверочного входа читает первые байты настоящего ролика и сверяет признак
+  // формата. Такой же запрос без сеанса должен получить отказ.
   func testLiveAuthenticatedRangeAndMissingSessionRejection() async throws {
     let profile = try StudioTestServer.profile()
     let api = NetworkAPI(profile: profile), anonymous = NetworkAPI(profile: nil)

@@ -1,3 +1,6 @@
+// Связывает экран просмотра, право проигрывания и сохранённое время. При смене вложения
+// останавливает прежний источник до открытия следующего.
+
 import AVFoundation
 import UIKit
 
@@ -32,14 +35,19 @@ struct PlaybackTarget: Equatable {
   var onChange: (() -> Void)?
   var onDetachOutput: (() -> Void)?
   private var changeObservers: [UUID: () -> Void] = [:]
+  // Добавляет получателя изменений под отдельным номером, если владелец ещё открыт. Экран может
+  // снять свою подписку независимо.
   func observeChanges(_ action: @escaping () -> Void) -> UUID {
     let id = UUID()
     if !closed { changeObservers[id] = action }
     return id
   }
+  // Убирает получателя по его номеру. Ушедшая страница не должна получать изменения чужого видео.
   func removeChangeObserver(_ id: UUID) { changeObservers.removeValue(forKey: id) }
   var presentationOwner: UUID?
 
+  // Подключает остановку для камеры, реакцию на готовность или ошибку и остановку при уходе
+  // приложения в фон. Все эти события ведут через одного владельца просмотра.
   init(admission: MediaAdmission, media: MediaStore) {
     self.admission = admission
     self.media = media
@@ -65,6 +73,8 @@ struct PlaybackTarget: Equatable {
         MainActor.assumeIsolated { self?.stop() }
       })
   }
+  // Сверяет изменения строки с текущим файлом и видом сообщения. Останавливает просмотр, если
+  // новый снимок убрал или заменил исходник.
   func apply(_ delta: MessageDelta) {
     guard let target = currentTarget else { return }
     if delta.removedIDs.contains(target.messageID) {
@@ -81,6 +91,8 @@ struct PlaybackTarget: Equatable {
   }
   /// При получении файла или потокового источника проверяет поколение запроса, чтобы поздний ответ не начал
   /// другое воспроизведение.
+  // Закрывает предыдущий просмотр, проверяет тип и получает источник в фоне. Сверяет номер
+  // попытки и закрывает опоздавший файл, чтобы он не начал играть после другого выбора.
   func play(
     target: PlaybackTarget, startPaused: Bool = false, localOnly: Bool = false
   ) {
@@ -127,6 +139,8 @@ struct PlaybackTarget: Equatable {
       }
     }
   }
+  // Запрашивает право после возврата старого, затем подключает источник и сохранённое время. При
+  // позднем ответе возвращает полученное право вместо открытия чужого просмотра.
   private func playPrepared(target: PlaybackTarget, source: MediaPlaybackSource) {
     guard !closed else { return }
     generation += 1
@@ -168,6 +182,8 @@ struct PlaybackTarget: Equatable {
       }
     }
   }
+  // Дожидается готовности, перематывает и только затем подключает слой и запускает просмотр по
+  // просьбе экрана. Так временный кадр остаётся до нужной позиции.
   private func restoreIfReady() {
     guard session.ready, let saved = pendingRestore, !restoring else { return }
     pendingRestore = nil
@@ -181,6 +197,8 @@ struct PlaybackTarget: Equatable {
       self.notify()
     }
   }
+  // Сохраняет время и пиксели готового текущего видео. Во время восстановления прежнее место не
+  // должно затереться нулём.
   func rememberPlayback() {
     guard let target = currentTarget, session.ready, !restoring, pendingRestore == nil else {
       return
@@ -191,27 +209,37 @@ struct PlaybackTarget: Equatable {
       key: key, generation: cacheGeneration)
     session.rememberFrame(in: media.videoPlayback, key: key, generation: cacheGeneration)
   }
+  // Снимает предыдущий слой, сохраняет новый и подключает проигрыватель при допустимом состоянии.
+  // Два экрана не должны одновременно выводить один сеанс.
   func attach(output layer: AVPlayerLayer) {
     if output !== layer { output?.player = nil }
     output = layer
     bindPlayerToOutput()
   }
+  // На время восстановления оставляет слой без проигрывателя. Поверхность может продолжать
+  // показывать сохранённый кадр до конца перемотки.
   private func bindPlayerToOutput() {
     guard let output else { return }
     // Пока идёт перемотка, поверхность продолжает показывать сохранённый кадр.
     let player: AVPlayer? = restoringSavedPosition ? nil : session.player
     if output.player !== player { output.player = player }
   }
+  // Снимает проигрыватель с переданного слоя. Очищает общую ссылку только если снят именно
+  // текущий вывод.
   func detach(output layer: AVPlayerLayer) {
     layer.player = nil
     if output === layer { output = nil }
   }
+  // Сбрасывает намерение продолжать, останавливает ролик и сохраняет просмотр. Обновляет экран,
+  // чтобы тот сразу показал паузу.
   func pause() {
     wantsPlaying = false
     session.player.pause()
     rememberPlayback()
     notify()
   }
+  // Помнит намерение продолжать и ждёт допустимого сеанса. Если ролик почти закончился, сначала
+  // переносит позицию к началу.
   func resume(immediately: Bool = false) {
     wantsPlaying = true
     guard !closed, lease != nil, !restoringSavedPosition else { return }
@@ -224,6 +252,8 @@ struct PlaybackTarget: Equatable {
       resumeReadyPlayer(immediately: immediately)
     }
   }
+  // Запускает готовый ролик обычным способом или без ожидания буфера по запросу экрана. После
+  // запуска сообщает новое состояние.
   private func resumeReadyPlayer(immediately: Bool) {
     if immediately {
       session.player.playImmediately(atRate: 1)
@@ -232,9 +262,13 @@ struct PlaybackTarget: Equatable {
     }
     notify()
   }
+  // Держит выбранное время между нулём и длиной ролика, затем просит перемотку. Полоса не должна
+  // отправить проигрывателю время вне файла.
   func seek(ms: Int64, completion: @escaping (Bool) -> Void = { _ in }) {
     session.seek(ms: min(max(0, ms), max(0, durationMs)), completion: completion)
   }
+  // Запоминает место, снимает ожидание источника и права, закрывает вывод и сеанс. Только после
+  // возврата права сообщает о завершённой остановке.
   func stop(completed: @escaping () -> Void = {}) {
     rememberPlayback()
     generation += 1
@@ -257,11 +291,15 @@ struct PlaybackTarget: Equatable {
     notify()
     completed()
   }
+  // Оповещает экран и копию списка подписчиков. Подписчик может уйти во время обновления, не
+  // нарушив обход.
   private func notify() {
     onChange?()
     if !changeObservers.isEmpty { for action in Array(changeObservers.values) { action() } }
   }
   /// После закрытия новые запросы воспроизведения не принимаются.
+  // Закрывает сеанс и удаляет подписки и системных наблюдателей. Позднее событие уже не обновляет
+  // закрытый просмотр.
   func close() {
     guard !closed else { return }
     closed = true

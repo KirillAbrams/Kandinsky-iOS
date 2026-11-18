@@ -1,15 +1,25 @@
+// Проверка затемнения при открытом фото на айфоне. Верхняя системная область и края остаются
+// непрозрачными, даже когда изображение уводят жестом.
+
 import XCTest
 import UIKit
 @testable import Kandinsky
 @MainActor final class PhotoOcclusionTests: XCTestCase {
   private final class DismissPan: UIPanGestureRecognizer {
     override var state: UIGestureRecognizer.State {
+      // Возвращаем состояние перемещения, чтобы проверка сразу обработала движение без реального
+      // пальца.
       get { .changed }
+      // Оставляем состояние проверочного жеста заданным. Внешняя установка не меняет выбранный
+      // этап движения.
       set {}
     }
+    // Даём предсказуемый вертикальный сдвиг для переданного вида. Проверяем сдвинутый рисунок на
+    // всё ещё закрытом фоне.
     override func translation(in view: UIView?) -> CGPoint { CGPoint(x: 0, y: 80) }
   }
-  /// Читает пиксель вне медиа и кнопок, чтобы подтвердить чёрную подложку.
+  // Сверяем размер подложки с окном, затем сдвигаем фото. Точка вне медиа и кнопок должна
+  // остаться чёрной, а фон полностью непрозрачным.
   func testPhotoBackingIncludesStatusAreaAndStaysOpaqueDuringDrag() async throws {
     let h = try await RepositoryHarness.open(),
       media = MediaStore(store: h.store)

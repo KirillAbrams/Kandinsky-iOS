@@ -1,3 +1,6 @@
+// Держит системный проигрыватель, текущий источник и его наблюдателей. Управляет перемоткой и
+// даёт сохранить кадр перед уходом.
+
 import AVFoundation
 import CoreImage
 
@@ -22,9 +25,12 @@ import CoreImage
     let value = player.currentTime().seconds
     return value.isFinite ? Int64(max(0, value) * 1000) : 0
   }
+  // Создаёт сеанс с выключенным звуком. Встроенный ролик не должен шуметь при первом появлении.
   init() { player.isMuted = true }
   /// Отслеживает готовность, ошибки и положение с проверкой поколения, чтобы поздние события не меняли
   /// другой источник.
+  // Закрывает старый источник, настраивает запас байтов и повтор, подключает наблюдение за
+  // состоянием и временем. Номер сеанса защищает новый ролик от прежних уведомлений.
   func replace(source: MediaPlaybackSource, loop: Bool = false) {
     stop()
     self.source = source
@@ -62,6 +68,8 @@ import CoreImage
       forInterval: CMTime(value: 1, timescale: 4), queue: .main
     ) { [weak self] _ in MainActor.assumeIsolated { self?.onChange?() } }
   }
+  // Переносит получение пикселей и наблюдение на текущий элемент. Проверяет его при ответе, чтобы
+  // ошибка другого ролика не стала ошибкой нового.
   private func observeCurrentItem(ticket: Int) {
     status?.invalidate()
     status = nil
@@ -86,6 +94,8 @@ import CoreImage
       }
     }
   }
+  // Отменяет незаконченные переносы позиции и запрашивает точное время. Подтверждает только
+  // последнюю перемотку текущего сеанса.
   func seek(ms: Int64, completion: @escaping (Bool) -> Void) {
     seekGeneration += 1
     let seekTicket = seekGeneration
@@ -104,6 +114,8 @@ import CoreImage
       }
     }
   }
+  // Берёт пиксели текущего времени, учитывает поворот и передаёт хранилищу способ уменьшить кадр.
+  // При возврате сохранённая картинка сохранит ориентацию ролика.
   func rememberFrame(in cache: VideoPlaybackCache, key: VideoPlaybackKey, generation: Int) {
     guard ready, let item = player.currentItem,
       let buffer = frameOutput?.copyPixelBuffer(
@@ -127,6 +139,8 @@ import CoreImage
         colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!, deferred: false)
     }
   }
+  // Отменяет перемотку и наблюдение, останавливает повтор и проигрыватель и закрывает источник.
+  // Иначе файл и старые обратные вызовы остались бы жить после смены видео.
   func stop() {
     generation += 1
     seekGeneration += 1

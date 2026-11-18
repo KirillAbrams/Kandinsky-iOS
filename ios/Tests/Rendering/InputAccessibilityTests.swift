@@ -1,7 +1,12 @@
+// Проверяем, что системный крупный шрифт увеличивает поле ввода и оставляет кнопку отправки
+// доступной.
+
 import XCTest
 import UIKit
 @testable import Kandinsky
 @MainActor final class InputAccessibilityTests: XCTestCase {
+  // Проверяем условие с короткими паузами до пяти секунд. Даём системе время обновить шрифт и
+  // размер поля, затем явно останавливаем проверку при отсутствии изменения.
   private func waitFor(_ predicate: () -> Bool) async throws {
     let end = Date().addingTimeInterval(5)
     while Date() < end {
@@ -10,6 +15,8 @@ import UIKit
     }
     XCTAssertTrue(predicate(), "Native accessibility font/layout did not update")
   }
+  // Помещаем форму во временное окно и задаём самый крупный системный размер текста. Проверяем
+  // запас высоты под строку, отсутствие наложения и область нажатия кнопки не меньше 44 точек.
   private func check(_ view: UIView, inputID: String, sendID: String) async throws {
     let scene = try XCTUnwrap(
       UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
@@ -42,6 +49,8 @@ import UIKit
     XCTAssertGreaterThanOrEqual(send.bounds.width, 44)
     XCTAssertGreaterThanOrEqual(send.bounds.height, 44)
   }
+  // Запускаем общую проверку размеров на настоящей форме чата. Это ловит случай, когда кнопка
+  // перекрывает текст после увеличения шрифта.
   func testComposerAdaptsInputAndHitTargetToLargeSystemFont() async throws {
     try await check(
       ConversationChrome(chatID: 3, onBack: {}), inputID: "composer.input", sendID: "composer.send")

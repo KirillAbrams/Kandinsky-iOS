@@ -1,4 +1,6 @@
 // !$*UTF8*$!
+// Перечисляет исходники, ресурсы и цели сборки приложения и его проверок. После переноса
+// исходника здесь нужен верный путь, иначе файл останется вне сборки.
 { archiveVersion = 1; classes = {}; objectVersion = 56; objects = {
 E21BEDF3610226776221C4C8 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Tests/Media/VideoCoverRestoreTests.swift"; sourceTree = SOURCE_ROOT; };
 AEB5279F6F906209D8A5AF75 = { isa = PBXBuildFile; fileRef = E21BEDF3610226776221C4C8; };

@@ -1,3 +1,6 @@
+// Управляет окнами Кандинского на айфоне. Восстанавливает вход, открывает историю, передаёт
+// изменения на экран и закрывает службы прежнего аккаунта.
+
 import UIKit
 
 @MainActor final class AppCoordinator {
@@ -20,9 +23,15 @@ import UIKit
   private var studioOptions = KandinskyOptions()
   private var generation = 0
   private var allowedChatIDs: Set<ChatID> = []
+  // Сохраняет окно, в котором будут показаны вход, черновик и чат. Все переходы меняют содержимое
+  // одного окна.
   init(window: UIWindow) { self.window = window }
 
+  // Заменяет набор чатов, которые можно открыть. Это не даёт старому действию показать историю с
+  // недоступным номером.
   func setAllowedChats(_ ids: Set<ChatID>) { allowedChatIDs = ids }
+  // Открывает папку приложения, восстанавливает вход и готовит службы аккаунта. Возвращает
+  // сохранённый черновик или недавний чат, а при отсутствии входа показывает форму.
   func start(invitation: String? = nil) {
     let controller = UIViewController()
     controller.view.backgroundColor = KandinskyPalette.empty
@@ -122,6 +131,8 @@ import UIKit
       }
     }
   }
+  // Снимает ещё не показанный экран, сохраняет его место чтения при возможности и возвращает
+  // управление видимому окну. Иначе отменённый переход мог бы оставить окно недоступным.
   private func cancelPendingNavigation() {
     if let controller = pendingController {
       if let surface = controller.view as? ConversationChrome {
@@ -136,6 +147,8 @@ import UIKit
     }
     window.rootViewController?.view.isUserInteractionEnabled = true
   }
+  // Раскладывает новый экран в скрытом виде и временно выключает действия на старом. До
+  // завершения подготовки пользователь и служба озвучивания не попадут на незагруженную историю.
   private func prepareNavigation(_ controller: UIViewController) {
     pendingController = controller
     window.rootViewController?.view.isUserInteractionEnabled = false
@@ -149,6 +162,8 @@ import UIKit
     surface.setNeedsLayout()
     surface.layoutIfNeeded()
   }
+  // Сверяет номер перехода и ожидаемый экран, затем показывает только этот экран. Запоздалое
+  // завершение предыдущей загрузки не перекроет текущий чат.
   private func revealNavigation(_ controller: UIViewController, ticket: Int) {
     guard generation == ticket, pendingController === controller else { return }
     closeConversationForNavigation()
@@ -161,6 +176,8 @@ import UIKit
     controller.view.setNeedsLayout()
     controller.view.layoutIfNeeded()
   }
+  // При действующем входе открывает заготовку новой истории. Если подключения нет, закрывает
+  // прежнее состояние и показывает вход, чтобы запросы не ушли без владельца.
   func showChats() {
     if let network {
       showStudioDraft(network: network)
@@ -175,6 +192,9 @@ import UIKit
     Task { await old?.close() }
     showAccountEntry()
   }
+  // Проверяет доступный номер, запоминает его для владельца и готовит историю с сохранённой
+  // точкой. Перед показом сверяет номер перехода, чтобы медленный запрос не открыл уже покинутый
+  // чат.
   func openChat(id: ChatID) {
     let openToken = MetricsRuntime.recorder.begin()
     guard allowedChatIDs.contains(id) else { return }
@@ -216,12 +236,15 @@ import UIKit
       revealNavigation(controller, ticket: ticket)
     }
   }
+  // Берёт настройки генерации с видимого экрана до его замены. Следующая история может начать с
+  // тех же настроек.
   private func saveStudioOptions() {
     guard network != nil, let surface = window.rootViewController?.view as? ConversationChrome
     else { return }
     studioOptions = surface.generationOptions
   }
-  /// Сохраняем новый черновик на телефоне. Номер чата получим при выборе фото или отправке описания.
+  // Восстанавливает ввод или сохраняет новую заготовку с постоянным номером. Создаёт серверный
+  // чат при выборе исходника или первой отправке и сверяет актуальность перехода после ожидания.
   private func showStudioDraft(
     network: NetworkSync, autoSelect: Bool = false, restored: StudioDraftRecord? = nil
   ) {
@@ -330,6 +353,8 @@ import UIKit
       openChat(id: first.id)
     }
   }
+  // Подключает панель к открытию, созданию и удалению чата, выходу и удалению аккаунта. При
+  // удалении активной истории приложение уйдёт с её экрана.
   private func makeStudioHistoryDrawer(network: NetworkSync) -> StudioHistoryController {
     StudioHistoryController(
       network: network, selected: currentChatID,
@@ -348,7 +373,8 @@ import UIKit
         if self.currentChatID == id { self.showChats() }
       })
   }
-  /// После закрытия панели возвращает эти состояния прежнему чату.
+  // Проверяет, что поверх чата можно открыть панель, и скрывает прежний экран от озвучивания.
+  // После закрытия возвращает ему отображение и доступность.
   private func openStudioDrawer() {
     guard let network else {
       showChats()
@@ -366,8 +392,8 @@ import UIKit
     }
     presenter.present(drawer, animated: false) { drawer.enter() }
   }
-  /// Команду выхода серверу отправляет отдельно с прежним ключом, чтобы не затронуть уже выбранный другой
-  /// вход.
+  // Убирает текущий вход на телефоне и переключает экран. Запрос выхода уходит с сохранённым
+  // прежним ключом, поэтому не завершит другой вход.
   private func logoutStudio() {
     guard let profile = network?.profile else { return }
     do {
@@ -384,6 +410,9 @@ import UIKit
       window.rootViewController?.present(alert, animated: true)
     }
   }
+  // Просит пароль, разрешает подтверждение только при допустимой длине и начинает местную очистку
+  // после принятия сервером. Ошибка оставляет пользователю возможность исправить пароль или
+  // повторить.
   private func confirmAccountErasure(_ sync: NetworkSync) {
     guard network === sync else { return }
     let alert = UIAlertController(
@@ -423,15 +452,16 @@ import UIKit
     }
     window.rootViewController?.present(alert, animated: true)
   }
-  /// Оставляет пользователю текущий экран, чтобы исправить пароль или повторить действие после
-  /// восстановления связи.
+  // Показывает причину отказа поверх текущего экрана. Человек может подтвердить сообщение и
+  // попробовать ещё раз без потери текущей страницы.
   private func showAccountErasureError(_ message: String) {
     let alert = UIAlertController(
       title: "Удаление аккаунта", message: message, preferredStyle: .alert)
     alert.addAction(UIAlertAction(title: "Понятно", style: .default))
     window.rootViewController?.present(alert, animated: true)
   }
-  /// Записываем, чей аккаунт нужно очистить. Если приложение закроется, продолжим удаление при запуске.
+  // Проверяет, что уведомление относится к текущему аккаунту, и записывает отметку о его очистке.
+  // После остановки приложения по ней можно продолжить удаление.
   private func eraseAccountLocally(_ sync: NetworkSync) {
     guard network === sync, let store else { return }
     let root = store.root.deletingLastPathComponent()
@@ -439,6 +469,8 @@ import UIKit
     try? NetworkCredentials.stageErasure(userID, root: root)
     switchAccount(erasing: (userID, root))
   }
+  // Показывает форму с отдельным подключением для входа. После выбора сохранённого или нового
+  // профиля закрывает форму и запускает открытие истории заново.
   private func showAccountEntry() {
     let entry = AccountEntryController(api: NetworkAPI(profile: nil))
     accountEntry = entry
@@ -449,6 +481,8 @@ import UIKit
     }
     window.rootViewController = entry
   }
+  // Сохраняет место чтения и закрывает видимый чат. Общая память файлов помогает соседнему экрану
+  // использовать уже подготовленные вложения.
   private func closeConversationForNavigation() {
     guard let surface = window.rootViewController?.view as? ConversationChrome else { return }
     if let media {
@@ -457,8 +491,8 @@ import UIKit
       surface.persistAnchorAndClose()
     }
   }
-  /// Для удаления сначала скрывает прежние данные и запускает очистку, а для обычной смены открывает вход
-  /// после закрытия.
+  // Отменяет переходы, закрывает службы и базу прежнего владельца, затем открывает вход или
+  // продолжает очистку. При удалении сразу скрывает прежний экран.
   private func switchAccount(erasing: (Int64, URL)? = nil) {
     generation += 1
     cancelPendingNavigation()
@@ -489,6 +523,8 @@ import UIKit
       showAccountEntry()
     }
   }
+  // Вне потока экрана записывает отметку и доводит очистку до конца. При отказе оставляет повтор
+  // с тем же владельцем, чтобы не пришлось начинать всё сначала.
   private func finishLocalErasure(_ id: Int64, root: URL, ticket: Int) {
     Task {
       do {
@@ -511,12 +547,16 @@ import UIKit
       }
     }
   }
+  // Открывает заготовку нового чата при действующем входе. Пока первая отправка уже создаёт чат,
+  // второе нажатие не начнёт новый переход.
   private func composeNetworkChat() {
     guard let network,
       (window.rootViewController?.view as? ConversationChrome)?.isStartingThread != true
     else { return }
     showStudioDraft(network: network)
   }
+  // Сообщает о сбое при создании истории. Текущий экран остаётся доступен для повтора или
+  // исправления исходных данных.
   private func showStudioCreationError() {
     let alert = UIAlertController(
       title: "Не удалось начать историю", message: "Проверьте соединение.", preferredStyle: .alert)
@@ -524,14 +564,20 @@ import UIKit
     window.rootViewController?.present(alert, animated: true)
   }
 
+  // Передаёт сетевым службам сведения о действии пользователя. По ним служба может правильно
+  // учитывать активность текущего входа.
   func userInteraction() { network?.userInteraction() }
 
+  // При возвращении возобновляет обмен и разрешает показ вложений на видимых экранах. Если поверх
+  // текущего открыто другое окно, вложения под ним не начинают работу.
   func graphicsVisible(_ value: Bool) {
     if value { network?.foreground(true) }
     (window.rootViewController?.view as? ConversationChrome)?.setMediaVisible(
       value && window.rootViewController?.presentedViewController == nil)
     (pendingController?.view as? ConversationChrome)?.setMediaVisible(value)
   }
+  // При уходе в фон приостанавливает обмен и показ вложений, останавливает запись и просит
+  // сохранить состояние. Это освобождает ресурсы и помогает вернуться к тому же месту.
   func background() {
     network?.foreground(false)
     MetricsRuntime.export()
@@ -540,10 +586,14 @@ import UIKit
     stopMedia()
     flush()
   }
+  // Останавливает активное воспроизведение. При потере видимости оно не продолжит использовать
+  // звук и декодировать кадры.
   func stopMedia() { playback?.stop() }
-  /// Не удерживает поток экрана ожиданием базы, поскольку само состояние сохраняется асинхронно.
+  // Просит состояние сохранить накопленные изменения в отдельной задаче. Экран не стоит в
+  // ожидании ответа базы, но запись получает возможность завершиться.
   func flush() { Task { try? await state?.flush() } }
-  /// Очищает номер текущего чата и корневой экран, чтобы прежние представления больше не использовались.
+  // Отменяет переходы, закрывает форму входа, службы аккаунта и окно. Очередь дочитывает нужное
+  // для закрытия состояние и закрывает базу после очистки ссылок на экран.
   func close() {
     allowedChatIDs.removeAll()
     generation += 1

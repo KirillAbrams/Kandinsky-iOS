@@ -1,8 +1,13 @@
+// Проверяем цветные составные знаки в обычном поле ввода ещё до подготовки сообщения в ленте.
+
 import XCTest
 import UIKit
 @testable import Kandinsky
 
 @MainActor final class EmojiComposerTests: XCTestCase {
+  // Вводим составной семейный знак, проверяем, что поле считает его одним символом, и ищем
+  // цветные пиксели. Убираем цвет курсора из замера, чтобы он не замаскировал пропавший цвет
+  // знака.
   func testNativeTextInputDrawsColoredZWJBeforeAnyChatLayout() async throws {
     let scene = try XCTUnwrap(
       UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)

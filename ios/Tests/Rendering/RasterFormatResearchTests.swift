@@ -1,9 +1,14 @@
+// Сравниваем два способа хранения нарисованного сообщения в памяти. Проверяем совпадение букв,
+// края и цвета и отдельно замеряем затраты на рисование.
+
 import XCTest
 import UIKit
 import Darwin
 @testable import Kandinsky
 
 @MainActor final class RasterFormatResearchTests: XCTestCase {
+  // Выделяем картинку под один фрагмент с заданным порядком байтов и выравниванием строк. Рисуем
+  // туда один и тот же подготовленный текст, чтобы изолировать различия формата.
   private nonisolated static func raster(
     _ prepared: PreparedText, _ info: UInt32, _ rowAlignment: Int
   ) throws -> CGImage {
@@ -18,6 +23,8 @@ import Darwin
     prepared.draw(part: 0, in: context)
     return try XCTUnwrap(context.makeImage())
   }
+  // Узнаём формат системного рисунка и проверяем его на настоящих сообщениях. Смена порядка
+  // хранения пикселей не должна ухудшить очертания букв или углов.
   func testCompareStandardDeviceBitmapFormatForActualMessageRasters() async throws {
     let format = UIGraphicsImageRendererFormat()
     format.scale = 1
@@ -55,6 +62,8 @@ import Darwin
           messageID: row.id, revision: 1, width: index == 2 ? 304 : 280, fontSize: 18, scale: 3))
     }
     defer { resources.forEach { $0.close() } }
+    // Приводим рисунок к четырём одинаково расположенным составляющим пикселя. Иначе различие
+    // порядка байтов выглядело бы как различие цвета.
     func pixels(_ image: CGImage) throws -> [UInt8] {
       let context = try XCTUnwrap(
         CGContext(
@@ -88,6 +97,8 @@ import Darwin
       continuation in
       worker.async {
         do {
+          // Получаем время работы текущего потока в секундах. Отдельный замер потока уменьшает
+          // влияние соседних работ.
           func cpu() throws -> Double {
             var info = thread_basic_info_data_t(),
               count = mach_msg_type_number_t(
@@ -106,6 +117,8 @@ import Darwin
             return Double(info.user_time.seconds) + Double(info.system_time.seconds) + Double(
               info.user_time.microseconds + info.system_time.microseconds) / 1_000_000
           }
+          // Повторяем рисование одной подборки с выбранным форматом и выравниванием. Возвращаем
+          // время и суммарную площадь, чтобы заметить разный объём работы.
           func batch(_ bitmapInfo: UInt32, _ rowAlignment: Int) throws -> [String: Double] {
             let start = ProcessInfo.processInfo.systemUptime, cpuStart = try cpu()
             var digest = 0

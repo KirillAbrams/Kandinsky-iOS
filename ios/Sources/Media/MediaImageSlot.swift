@@ -1,3 +1,6 @@
+// Показывает одну картинку или кадр видео в ленте. При смене вложения отменяет старые запросы и
+// не даёт размытой копии закрыть чёткую.
+
 import UIKit
 @MainActor final class MediaImageSlot {
   private struct BindingAppearance: Equatable {
@@ -84,6 +87,8 @@ import UIKit
     render: { [weak self] frame in
       MainActor.assumeIsolated { self?.publish(frame) }
     })
+  // Собирает слой картинки, знак запуска и управление загрузкой. Подписывается на очистку
+  // хранилища, чтобы снятое медиа исчезло с экрана.
   init(store: MediaStore) {
     self.store = store
     layer.masksToBounds = true
@@ -111,6 +116,8 @@ import UIKit
     updateControl()
     invalidation = store.registerInvalidation { [weak self] in self?.clear() }
   }
+  // Обновляет рамку и выбирает вид изображения. Для прежнего файла сохраняет кадр, а для нового
+  // отменяет старые ответы. Сначала ищет сохранённый кадр видео, затем обычную миниатюру.
   func bind(
     _ attachment: Attachment, frame: CGRect, circular: Bool = false, maxPixel: Int = 1024,
     cornerRadius: CGFloat = 12, bottomSquare: Bool = false, kind: MessageKind? = nil,
@@ -211,6 +218,8 @@ import UIKit
     loadThumbnail(attachment, key: thumbnail, token: token, localOnly: localOnly)
   }
 
+  // Сразу выводит готовую копию или запрашивает её в фоне. Отличает отложенную загрузку от ошибки
+  // и принимает ответы только текущей попытки.
   private func loadThumbnail(
     _ attachment: Attachment, key thumbnail: ThumbnailKey, token: UInt64, localOnly: Bool
   ) {
@@ -265,6 +274,8 @@ import UIKit
     return appearance?.galleryPreview != true || !store.wasShownInGallery(attachment)
   }
 
+  // Показывает размытый кадр, пока нет готового и он разрешён для этого вложения. Уже
+  // просмотренное в галерее медиа не подменяется такой картинкой снова.
   private func showTinyPreviewIfNeeded() {
     guard canPresentTinyPreview, !ready, playbackFrameRequest == nil, tinyRequest == nil,
       let attachment, let binding
@@ -281,6 +292,8 @@ import UIKit
     }
   }
 
+  // Меняет рамку, углы и фон только при отличиях и без скрытой анимации. Прокрутка не должна
+  // заново перестраивать неизменившийся рисунок.
   private func updateLayerGeometry(
     frame: CGRect, radius: CGFloat, bottomSquare: Bool, background: CGColor,
     maskedCorners: CACornerMask?
@@ -303,6 +316,8 @@ import UIKit
     if backgroundChanged { layer.backgroundColor = background }
     CATransaction.commit()
   }
+  // Передаёт действительный кадр слою, вычисляет масштаб заполнения и обновляет готовность. При
+  // снятии кадра сразу убирает старые пиксели.
   private func publish(_ frame: PreparedImage?) {
     CATransaction.begin()
     CATransaction.setDisableActions(true)
@@ -339,6 +354,8 @@ import UIKit
       loading ? "Отменить загрузку" : "Повторить загрузку"
     )
   }
+  // Проверяет попадание в кнопку и либо отменяет передачу, либо повторяет запрос с прежней
+  // рамкой. Действие относится только к текущему вложению.
   @discardableResult func performLoadAction(at point: CGPoint) -> Bool {
     guard let action = loadAction, action.0.contains(point), !closed else { return false }
     if loading {
@@ -362,6 +379,8 @@ import UIKit
     }
     return true
   }
+  // Сравнивает прежние кнопки с нужными сейчас и меняет только отличия. Готовое фото не
+  // перекрывается кольцом загрузки, а ошибка показывает повтор.
   private func updateControl() {
     let bounds = Self.controlBounds
     let next = ControlAppearance(
@@ -389,11 +408,17 @@ import UIKit
       cross.path = next.retry ? Self.retryPath : Self.cancelPath
     }
   }
+  // Ставит раннюю подготовку видео после готовности кадра. Пока идёт загрузка или уже есть
+  // подготовка, второй запрос не нужен.
   func prepareOriginalVideo(_ attachment: Attachment) {
     guard ready, !loading, !failed, videoPreparation == nil else { return }
     videoPreparation = store.prepareStudioVideo(attachment)
   }
+  // Выдаёт отдельное удержание текущего изображения. Следующий экран сможет закрыть его
+  // независимо от этой ячейки.
   func preview() -> PreparedImage? { displayed?.retained() }
+  // Проверяет ключ и ищет кадр в памяти. Если он уже показан, закрывает лишнее удержание без
+  // замены.
   @discardableResult func showSavedPlaybackFrame(for expectedKey: VideoPlaybackKey? = nil) -> Bool {
     guard !closed, let key = playbackFrameKey, expectedKey == nil || key == expectedKey,
       let frame = store.videoPlayback.cover(key)
@@ -407,6 +432,8 @@ import UIKit
     }
     return true
   }
+  // Отменяет работу над обычной и размытой картинками и ставит сохранённый кадр выше по порядку.
+  // Поздний ответ меньшего качества больше не перекроет его.
   func seedPlaybackFrame(_ image: PreparedImage) {
     guard !closed, let binding, image.image != nil else { image.close(); return }
     // Чёткий кадр уже готов, поэтому заставка и её декодирование больше не нужны.
@@ -424,6 +451,8 @@ import UIKit
     mailbox.offer(image, binding: binding, sequence: playbackFrameSequence)
     mailbox.flush()
   }
+  // Принимает картинку от соседнего экрана только если она подходит и не хуже готовой. Выбирает
+  // порядок по размеру и виду, а ненужное удержание закрывает.
   func seed(_ image: PreparedImage) {
     if playbackFrameRequest != nil || image.isTinyPreview && !canPresentTinyPreview {
       image.close()
@@ -444,6 +473,8 @@ import UIKit
     mailbox.offer(image, binding: binding, sequence: serial)
     mailbox.flush()
   }
+  // Отменяет чтения и сбрасывает признак прежнего запроса. Следующая привязка может загрузить
+  // нужный файл заново.
   func refresh() {
     loadAttempt += 1
     playbackFrameRequest?.cancel()
@@ -460,12 +491,16 @@ import UIKit
     updateControl()
   }
   /// Сразу применяет очистку в потоке экрана, чтобы прежняя системная ссылка не оставалась до уведомления.
+  // Сбрасывает запросы и сразу убирает кадр в потоке экрана. Системный слой не должен держать его
+  // до будущего уведомления.
   func clear() {
     refresh()
     mailbox.clear()
     mailbox.flush()
   }
   /// Удаляет наблюдение хранилища, чтобы сброс медиа больше не обращался к закрытому владельцу.
+  // Окончательно останавливает ячейку, снимает слой и подписку. Поздняя очистка хранилища больше
+  // не обращается к ушедшему экрану.
   func close() {
     guard !closed else { return }
     closed = true

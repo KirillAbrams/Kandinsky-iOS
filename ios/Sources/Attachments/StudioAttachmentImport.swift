@@ -1,17 +1,27 @@
+// Берёт файл, открытый через системную галерею, и подготавливает его для чата. Короткое право
+// галереи используется лишь для создания собственной временной копии.
+
 import UIKit
 import PhotosUI
 import UniformTypeIdentifiers
 
 private final class GrantedGalleryFile: @unchecked Sendable {
   let url: URL, mime: String
+  // Сохраняет путь и вид временного файла под одним владельцем. Копию можно передать подготовке,
+  // а затем удалить через тот же объект.
   init(url: URL, mime: String) {
     self.url = url
     self.mime = mime
   }
+  // Убирает принадлежащую объекту временную копию. Её можно попытаться удалить повторно без
+  // ошибки для вызывающего кода.
   func close() { try? FileManager.default.removeItem(at: url) }
+  // Удаляет копию при освобождении владельца, даже если импорт не успел явно завершиться.
   deinit { close() }
 }
 @MainActor enum StudioAttachmentImport {
+  // Делает местную копию предоставленного файла, затем выбирает подготовку снимка или обычного
+  // вложения. Временный источник убирает после успешной или неудачной попытки.
   static func stage(_ provider: NSItemProvider, media: MediaStore) async throws -> AttachmentDraft {
     let file = try await copyGrantedFile(provider, root: media.store.root)
     defer { file.close() }
@@ -20,7 +30,8 @@ private final class GrantedGalleryFile: @unchecked Sendable {
     }
     return try await media.stageSelection(sourceURL: file.url, mime: file.mime)
   }
-  /// Доступ к файлу из системного окна выбора временный. Копируем файл, пока этот доступ открыт.
+  // Читает только доступный файл известного вида и копирует порциями с ограничением размера и
+  // закрытым доступом. Один ответ завершает операцию, а позднюю копию после отмены удаляет.
   nonisolated private static func copyGrantedFile(_ provider: NSItemProvider, root: URL) async throws
     -> GrantedGalleryFile
   {

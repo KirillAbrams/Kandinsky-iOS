@@ -1,6 +1,12 @@
+// Проверяем размеры сообщений с текстом, фото и видео. Отступы и кнопки сравниваем с точными
+// координатами, чтобы смена расчёта не сдвинула элементы чата.
+
 import XCTest
 @testable import Kandinsky
 final class BubbleGeometryTests: XCTestCase {
+  // Сверяем высоту короткой строки, положение фото и места кнопок под ним. У видео должна
+  // добавляться кнопка раскрытия, а под одиночным фото не должно появляться непрозрачной
+  // подложки.
   func testReferenceShortTextAndPhotoActionFooter() {
     let text = Message(
       id: 1, chatID: 2, order: OrderKey(sortKey: 1, messageID: 1), direction: .incoming,
@@ -51,6 +57,8 @@ final class BubbleGeometryTests: XCTestCase {
     XCTAssertTrue((0..<(width * height)).contains { pixels[4 * $0 + 3] > 100 })
     XCTAssertEqual(p.mediaOnlyBackground?.alpha, 0)
   }
+  // Проверяем отступ текста, общую высоту и форму хвостика исходящего запроса. Время остаётся на
+  // отдельном месте, а хвостик появляется только внизу.
   func testKandinskyPromptKeepsSeparateTimestampAndTail() throws {
     let prompt = Message(
       id: 3, chatID: 2, order: OrderKey(sortKey: 3, messageID: 3), direction: .outgoing,
@@ -76,6 +84,8 @@ final class BubbleGeometryTests: XCTestCase {
     prepared.draw(part: 0, in: bitmap)
     let pixels = try XCTUnwrap(bitmap.data).assumingMemoryBound(to: UInt8.self)
     let tailX = width - 4
+    // Читаем прозрачность одного пикселя на выбранной горизонтальной позиции. Так отличаем нижний
+    // хвостик от случайного окрашивания той же позиции посередине.
     func alpha(_ y: Int) -> UInt8 { pixels[y * bitmap.bytesPerRow + tailX * 4 + 3] }
     XCTAssertEqual(alpha(height / 2), 0)
     XCTAssertGreaterThan((height - 8..<height).map(alpha).max() ?? 0, 100)

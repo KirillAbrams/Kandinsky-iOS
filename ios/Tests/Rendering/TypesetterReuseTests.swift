@@ -1,3 +1,6 @@
+// Сверяем новую подготовку текста с отдельным образцом по виду, размерам, точке чтения и
+// затратам.
+
 import XCTest
 import UIKit
 import CoreText
@@ -13,6 +16,8 @@ import Darwin
       repeating: "В мастерской проверили свет, затем отправили фотографии. 👋 مرحبا é ", count: 35),
     String(repeating: "LongUnbrokenWord👨‍👩‍👧‍👦", count: 30)
   ]
+  // Создаём сообщение из набора текстов и видов вложений по номеру случая. Заранее известный
+  // порядок позволяет прогонять обе разметки на одних данных.
   private nonisolated static func message(_ index: Int) -> Message {
     let kinds: [MessageKind] = [.text, .photo, .video, .round, .voice, .gif, .sticker]
     let kind = kinds[(index / 10) % kinds.count], value = texts[index % texts.count]
@@ -34,13 +39,16 @@ import Darwin
     row.delivery = [MessageDelivery.pending, .accepted, .read, .failed][index % 4]
     return row
   }
-  /// Отдельно задаёт расширенный режим и диаметр круглого медиа, чтобы сравнить разные варианты раскладки.
+  // Выбираем ширину, размер шрифта, масштаб и при необходимости диаметр круглого видео. Так
+  // образец покрывает разные сочетания размеров без случайных значений.
   private nonisolated static func key(_ index: Int) -> TextLayoutKey {
     TextLayoutKey(
       messageID: Int64(index + 1), revision: 1, width: [132, 200, 304, 360][index % 4],
       fontSize: [13, 17, 23][index % 3], scale: index % 3 + 1,
       roundDiameter: index % 2 == 0 ? 212 : nil)
   }
+  // Выделяем картинку нужного размера и масштаба, выполняем переданное рисование и возвращаем
+  // байты. Это даёт одинаковый способ сравнить фон и метки.
   private func raster(width: CGFloat, height: CGFloat, scale: Int, draw: (CGContext) -> Void) throws
     -> Data
   {
@@ -55,6 +63,8 @@ import Darwin
     draw(context)
     return Data(bytes: try XCTUnwrap(context.data), count: w * h * 4)
   }
+  // Сверяем размеры, объём памяти, шрифт, точки чтения, доступные строки и рисование каждого
+  // фрагмента. Проверка ловит изменения, даже если общая высота сообщения совпала.
   func testNativePixelsGeometryAnchorsAndAccessibilityMatchReference() throws {
     var parts = 0
     let legacyCases = Array(0..<10) + Array(30..<40) + Array(50..<70)
@@ -118,6 +128,8 @@ import Darwin
     }
     print("KANDINSKY_TYPESETTER_LEGACY_PIXEL_CASES 40 parts=\(parts)")
   }
+  // Проверяем, что кнопки скачивания и просмотра лежат ниже картинки, а текст запроса остаётся
+  // доступен. Лишняя подложка или выход кнопок за край становятся видимыми в проверке.
   func testStudioResultsKeepActionsBelowMediaAndPromptsExposeText() throws {
     for index in 10..<30 {
       let row = Self.message(index)
@@ -147,6 +159,8 @@ import Darwin
       XCTAssertGreaterThanOrEqual(try XCTUnwrap(lines.first).frame.minX, 14)
     }
   }
+  // Получаем время работы текущего потока в секундах и останавливаем замер при ошибке. Иначе
+  // неудавшийся запрос времени исказил бы сравнение.
   private nonisolated static func cpu() throws -> Double {
     var info = thread_basic_info_data_t(),
       count = mach_msg_type_number_t(
@@ -162,12 +176,15 @@ import Darwin
     return Double(info.user_time.seconds) + Double(info.system_time.seconds) + Double(
       info.user_time.microseconds + info.system_time.microseconds) / 1_000_000
   }
+  // Сравниваем подготовку обычных сообщений с образцом, который измеряет строку отдельно. Текущий
+  // способ должен сохранить тот же объём работы и укладываться в 85 процентов времени образца.
   func testPublicFactoryLayoutCPUAgainstSeparateLineReference() async throws {
     let report: Data = try await withCheckedThrowingContinuation { reply in
       DispatchQueue(label: "Kandinsky.test.typesetter", qos: .userInitiated).async {
         do {
           let inputs = (0..<10).map { (Self.message($0), Self.key($0)) }
-          /// Считает размеры, число частей и учтённую стоимость, чтобы варианты выполняли одинаковую работу.
+          // Повторяем подготовку выбранным способом и складываем размер, число частей и учтённую
+          // память. Суммы показывают, что варианты обработали одинаковые данные.
           func batch(_ candidate: Bool, loops: Int) throws -> [String: Double] {
             let begin = try Self.cpu()
             var work = 0.0
@@ -204,6 +221,8 @@ import Darwin
           guard Set(batches.compactMap { $0["layoutWork"] }).count == 1 else {
             throw MediaError.corrupt
           }
+          // Усредняем два средних значения из четырёх отсортированных замеров. Отдельное
+          // замедление меньше влияет на итоговое отношение.
           func median(_ values: [Double]) -> Double {
             let v = values.sorted()
             return (v[1] + v[2]) / 2

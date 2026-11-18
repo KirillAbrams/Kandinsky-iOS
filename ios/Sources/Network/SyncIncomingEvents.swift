@@ -1,6 +1,12 @@
+// Разводит по обработчикам входящие события, подтверждения и отказы. Сначала проверяет
+// действующее соединение, чтобы поздняя выдача не обновила экран после переподключения.
+
 import Foundation
 
 extension NetworkSync {
+  // Разбирает сетевое сообщение, проверяет номер соединения и выбирает действие по виду.
+  // Неизвестный вид останавливает обработку, вместо того чтобы пометить непрочитанные данные
+  // сохранёнными.
   func receiveFrame(_ data: Data, connectionID: Int) async throws {
     let value = try await api.object(data)
     guard connectionID == connectionEpoch, !Task.isCancelled else { return }
@@ -20,6 +26,8 @@ extension NetworkSync {
     }
   }
 
+  // При необходимости сначала читает недостающие карточки, затем записывает порцию и уведомляет
+  // экран и список. В конце даёт ход удалению файлов и следующим ожидающим отправкам.
   private func applyIncomingEvents(_ data: Data) async throws {
     let fetchedUnknownChats = try await store.perform { [cache] in
       try cache.hasUnknownChats($0, data: data)
@@ -38,6 +46,8 @@ extension NetworkSync {
     kick()
   }
 
+  // Разделяет отзыв входа, временный сбой и отказ текущей отправки. Это позволяет либо закрыть
+  // сеанс, либо повторить связь, либо показать отказ только в нужном сообщении.
   private func handleServerError(_ value: WireObject) async throws {
     let code = try value.string("code")
     if code == "account_deleted" || code == "invalid_session" {

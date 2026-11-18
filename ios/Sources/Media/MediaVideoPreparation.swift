@@ -1,3 +1,6 @@
+// Готовит части ближайших роликов по одному. Эта работа может уступить место текущему просмотру и
+// не занимает очередь после ухода последнего получателя.
+
 import Foundation
 
 /// Только ближайший ролик читает части файла; видимая передача может прервать эту подготовку.
@@ -10,6 +13,8 @@ import Foundation
     var done = false
     var request: MediaCancellation?
     var fetch: MediaCancellation?
+    // Запоминает ключ ролика и действие подготовки. Несколько заинтересованных элементов ленты
+    // могут ссылаться на одну запись.
     init(_ key: String, _ work: @escaping (MediaCancellation) throws -> Void) {
       self.key = key
       self.work = work
@@ -21,6 +26,8 @@ import Foundation
   private var paused = false
   private var closed = false
 
+  // Находит прежнюю запись или добавляет ещё одну до предела. Возвращает отдельную отмену
+  // получателю, чтобы его уход не мешал другим.
   func acquire(_ key: String, work: @escaping (MediaCancellation) throws -> Void)
     -> MediaCancellation?
   {
@@ -50,11 +57,15 @@ import Foundation
     startNext()
     return token
   }
+  // Приостанавливает начатое чтение, пока более важная работа использует очередь. После снятия
+  // паузы продолжает с первой незаконченной записи.
   func setPaused(_ value: Bool) {
     paused = value
     if value, let active { stop(active) }
     if !value { startNext() }
   }
+  // Меняет номер попытки, отменяет чтение и освобождает место активной работы. Поздний ответ
+  // старой попытки больше не завершит новую.
   private func stop(_ entry: Entry) {
     entry.generation += 1
     entry.fetch?.cancel()
@@ -63,6 +74,8 @@ import Foundation
     entry.request = nil
     if active === entry { active = nil }
   }
+  // При свободной очереди берёт первую незавершённую запись. После ответа проверяет номер попытки
+  // и запускает следующую, чтобы читать по одному ролику.
   private func startNext() {
     guard !closed, !paused, active == nil, let entry = entries.first(where: { !$0.done }) else {
       return
@@ -84,11 +97,15 @@ import Foundation
         self.startNext()
       })
   }
+  // Убирает список заранее подготовляемых роликов и отменяет работу по старым записям.
+  // Неактуальная прокрутка больше не тратит сеть.
   func clear() {
     let old = entries
     entries.removeAll()
     for entry in old { stop(entry) }
   }
+  // Закрывает подготовку для новых получателей, очищает старых и завершает очередь. Иначе чтение
+  // роликов продолжилось бы после ухода экрана.
   func close() {
     closed = true
     clear()

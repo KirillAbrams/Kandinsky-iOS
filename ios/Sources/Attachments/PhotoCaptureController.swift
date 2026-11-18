@@ -1,3 +1,6 @@
+// Открывает заднюю камеру, получает один снимок и передаёт его в местное хранилище. Освобождает
+// сеанс и право на съёмку до возврата в чат.
+
 import UIKit
 import AVFoundation
 @MainActor final class PhotoCaptureController: NSObject, AVCapturePhotoCaptureDelegate {
@@ -11,11 +14,15 @@ import AVFoundation
   private var data: Data?, captureError: Error?
   private var backgroundObserver: NSObjectProtocol?
   private var capturing = false, cancelled = false, closing = false
+  // Запоминает хранилище, очередь доступа к камере и назначение снимка. Подготовка фото для
+  // студии может отличаться от сохранения обычного изображения.
   init(media: MediaStore, admission: MediaAdmission, prepareStudioPhoto: Bool = false) {
     self.media = media
     self.admission = admission
     self.prepareStudioPhoto = prepareStudioPhoto
   }
+  // Проверяет наличие камеры, следит за уходом приложения в фон и запрашивает разрешение. Без
+  // этих проверок окно могло бы открыться без рабочей съёмки.
   func open(
     from presenter: UIViewController, completion: @escaping (Result<AttachmentDraft, Error>) -> Void
   ) {
@@ -28,6 +35,8 @@ import AVFoundation
     backgroundObserver = NotificationCenter.default.addObserver(
       forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
     ) { [weak self] _ in MainActor.assumeIsolated { self?.cancel() } }
+    // Начинает ожидание права на камеру только после разрешения и пока окно живо. Если разрешения
+    // нет, возвращает понятный отказ.
     func authorized(_ granted: Bool) {
       guard !closing else { return }
       guard granted else {
@@ -51,6 +60,8 @@ import AVFoundation
     default: authorized(false)
     }
   }
+  // Создаёт вход камеры и выход фото на рабочей очереди, запускает сеанс и только затем просит
+  // показать кадр. Экран не ждёт тяжёлой настройки камеры на своём потоке.
   private func configure(_ presenter: UIViewController) {
     guard
       let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)
@@ -76,6 +87,8 @@ import AVFoundation
       } catch { DispatchQueue.main.async { self.finish(.failure(error)) } }
     }
   }
+  // Показывает поле камеры и кнопки съёмки и отмены. Блокирует второй снимок, пока поступает
+  // первый, чтобы ответы не перепутались.
   private func show(_ presenter: UIViewController) {
     guard !closing else { return }
     let vc = UIViewController()
@@ -117,6 +130,8 @@ import AVFoundation
     modal = vc
     presenter.present(vc, animated: true)
   }
+  // Получает байты обработанного снимка и его ошибку, передаёт их главному потоку. Этот шаг ещё
+  // не означает, что камера закончила съёмку.
   nonisolated func photoOutput(
     _ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?
   ) {
@@ -126,7 +141,8 @@ import AVFoundation
       self.captureError = error
     }
   }
-  /// Удаляет временный файл, а при позднем завершении после закрытия отбрасывает неопубликованный импорт.
+  // При завершении проверяет отмену и ошибки, затем сохраняет снимок через временный файл.
+  // Позднюю копию отбрасывает, а временный файл убирает после импорта.
   nonisolated func photoOutput(
     _ output: AVCapturePhotoOutput,
     didFinishCaptureFor resolvedSettings: AVCaptureResolvedPhotoSettings, error: Error?
@@ -163,11 +179,14 @@ import AVFoundation
       }
     }
   }
-  /// Если фото уже снимается, ждём ответа камеры. Иначе закрытие экрана могло бы прервать запись файла.
+  // Отмечает отмену и закрывает сеанс сразу только без идущего снимка. При съёмке ждёт системного
+  // завершения, чтобы не освободить данные посередине.
   func cancel() {
     cancelled = true
     if !capturing { finish(.failure(MediaError.cancelled)) }
   }
+  // Единожды останавливает сеанс, снимает окно и затем возвращает право на камеру. Ответ
+  // отправляется после освобождения, иначе следующий экран мог бы открыть занятую камеру.
   private func finish(_ result: Result<AttachmentDraft, Error>) {
     guard !closing else { return }
     closing = true
@@ -199,6 +218,8 @@ import AVFoundation
   }
 }
 private extension Result {
+  // Передаёт значение либо ошибку в подходящее действие. Вызов не обрабатывает оба исхода одного
+  // разрешения.
   func fold(success: (Success) -> Void, failure: (Failure) -> Void) {
     switch self {
     case let .success(v): success(v)

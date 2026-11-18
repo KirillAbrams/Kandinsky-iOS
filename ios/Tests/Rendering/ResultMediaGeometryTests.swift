@@ -1,9 +1,16 @@
+// Проверяем размеры карточек генерации, фото, видео и подписей. Сверяем прозрачность и положение
+// кнопок по координатам и по нарисованным пикселям.
+
 import XCTest
 import UIKit
 import CoreText
 @testable import Kandinsky
 final class ResultMediaGeometryTests: XCTestCase {
+  // Проверяем процент одиночного задания и действия для разных исходов. Заблокированный результат
+  // не должен предлагать запрещённый повтор, а отменённый должен показать свой статус.
   func testSingleGenerationKeepsItsProgressAndOnlyOffersAllowedRetries() throws {
+    // Собираем одно задание с нужной стадией, процентом и причиной ошибки. Готовая карточка
+    // позволяет проверить правила кнопок и рисунок без запуска генерации.
     func prepare(
       _ stage: StudioGeneration.Stage, error: String? = nil, moderated: Bool? = nil,
       progress: Int? = nil
@@ -57,6 +64,8 @@ final class ResultMediaGeometryTests: XCTestCase {
     XCTAssertEqual(pixels[center * 4 + 3], 255)
   }
 
+  // Подставляем результаты по мере готовности в группу из четырёх фото или видео. Ячейки и высота
+  // карточки должны сохраняться и при ошибке, и при завершении.
   func testStudioBatchKeepsFourCellsWhenTheThirdFileArrives() throws {
     for (model, kind, mime) in [
       ("image", MessageKind.photo, "image/png"), ("video", .video, "video/mp4")
@@ -72,6 +81,8 @@ final class ResultMediaGeometryTests: XCTestCase {
       let attachment = Attachment(
         id: "net-1-result-third-file", relativePath: "remote/third-file", mime: mime, byteSize: 100,
         rawWidth: 512, rawHeight: 512, orientation: 1, durationMs: nil, thumbnailKey: "third-file")
+      // Готовим одно представление группы из заданных состояний и уже доступных файлов. Тот же
+      // расчёт размеров позволяет сравнить разные стадии одной группы.
       func prepare(_ slots: [StudioGeneration.Slot], _ media: [Attachment]) -> PreparedText {
         let state = StudioGeneration(
           stage: slots.allSatisfy { $0.status == .succeeded } ? .succeeded : .running, model: model,
@@ -134,7 +145,11 @@ final class ResultMediaGeometryTests: XCTestCase {
       XCTAssertEqual(finished.height, initial.height)
     }
   }
+  // Сравниваем одиночный цветной знак и обычный смешанный текст. Первый получает крупный размер и
+  // прозрачный фон, второй сохраняет обычную геометрию сообщения.
   func testEmojiOnlyUsesLargeTransparentMessageAndMixedTextKeepsItsBubble() {
+    // Создаём входящее сообщение с нужной строкой и фиксированными настройками шрифта. Так
+    // меняется только состав текста, который влияет на оформление.
     func prepared(_ text: String) -> PreparedText {
       let row = Message(
         id: 7, chatID: 2, order: OrderKey(sortKey: 1, messageID: 7), direction: .incoming,
@@ -161,6 +176,8 @@ final class ResultMediaGeometryTests: XCTestCase {
         p.height, 80, "Ordinary text and text-presentation symbols retain normal layout")
     }
   }
+  // Проверяем ширину наклейки и отсутствие скругления и подложки. Прозрачный центр фонового
+  // рисунка защищает от появления лишней карточки под наклейкой.
   func testStickerFitsReferenceEnvelopeWithoutPhotoCard() {
     let p = layout(.sticker, 512, 512)
     defer { p.close() }
@@ -174,6 +191,8 @@ final class ResultMediaGeometryTests: XCTestCase {
       bytes[(h / 2 * w + w / 2) * 4 + 3], 0,
       "Retained body pixels must remain transparent below the actual sticker")
   }
+  // Создаём сообщение с вложением нужного вида, размера и ориентации. Ограничение ширины и
+  // подпись можно задать отдельно для проверки крайних случаев.
   private func layout(
     _ kind: MessageKind, _ width: Int, _ height: Int, _ caption: String = "", orientation: Int = 1,
     bound: Int = 304
@@ -189,23 +208,31 @@ final class ResultMediaGeometryTests: XCTestCase {
       message: m,
       key: TextLayoutKey(messageID: 1, revision: 1, width: bound, fontSize: 17, scale: 2))
   }
+  // Проверяем, что круглое видео размещается в квадрате со стороной 212 точек. Иначе круг и его
+  // подписи могли бы занять лишнее место.
   func testCompactTelegramRoundDiameter() {
     let p = layout(.round, 480, 480)
     defer { p.close() }
     XCTAssertEqual(p.mediaRect!.width, 212, accuracy: 0.5)
     XCTAssertEqual(p.mediaRect!.height, 212, accuracy: 0.5)
   }
+  // Подставляем вертикальное фото и сверяем ширину и высоту после масштабирования. Так видна
+  // ошибка, при которой фотография сжимается по одной оси.
   func testPortraitFitsImageEnvelopeWithoutSquashing() {
     let p = layout(.photo, 600, 900)
     defer { p.close() }
     XCTAssertEqual(p.mediaRect!.height, 380, accuracy: 0.5)
     XCTAssertEqual(p.mediaRect!.width, 253.333, accuracy: 0.5)
   }
+  // Проверяем высоту участка под фото с короткой подписью. Форма не должна добавлять лишнюю
+  // строку между подписью и временем.
   func testShortCaptionSharesStatusRow() {
     let p = layout(.photo, 1600, 900, "Привет")
     defer { p.close() }
     XCTAssertLessThanOrEqual(p.height - p.mediaRect!.maxY, 37)
   }
+  // Рисуем круглое видео с подписью и проверяем прозрачный угол вне круга. Подпись не должна
+  // включать прямоугольную карточку позади видео.
   func testRoundWithCaptionHasNoRectangularCard() {
     let p = layout(.round, 480, 480, "Подпись")
     defer { p.close() }
@@ -217,12 +244,16 @@ final class ResultMediaGeometryTests: XCTestCase {
       bytes[40 * cg.bytesPerRow + 4 * 4 + 3], 0,
       "The round corner must stay transparent even when text is present")
   }
+  // Передаём размеры горизонтального видео с признаком разворота. После разворота расчёт должен
+  // применить пределы вертикального кадра.
   func testRotatedVideoUsesPortraitHeightEnvelope() {
     let p = layout(.video, 900, 600, orientation: 6)
     defer { p.close() }
     XCTAssertEqual(p.mediaRect!.width, 240, accuracy: 0.5)
     XCTAssertEqual(p.mediaRect!.height, 360, accuracy: 0.5)
   }
+  // Подставляем длинную подпись, письмо справа налево и явный перенос. Проверяем, что последняя
+  // строка остаётся внутри карточки с запасом снизу.
   func testCaptionLinesStayInsideCard() {
     for text in [
       String(repeating: "Длинная подпись ", count: 30), "مرحبا كيف حالك اليوم",
@@ -236,6 +267,8 @@ final class ResultMediaGeometryTests: XCTestCase {
     }
   }
 
+  // Рисуем подготовленный блок или только метки вложения в масштабе один к одному. Возвращаем
+  // размеры и байты, чтобы проверять отдельные точки по координатам.
   private func raster(_ p: PreparedText, stamps: Bool = false) -> (Int, Int, [UInt8]) {
     let format = UIGraphicsImageRendererFormat()
     format.scale = 1
@@ -258,11 +291,15 @@ final class ResultMediaGeometryTests: XCTestCase {
     return (w, h, bytes)
   }
 
+  // Проверяем пиксели длительности, времени и значка звука. Обе строки стоят внизу круга, а
+  // значок остаётся сверху без лишней строки под видео.
   func testRoundReferencePillsShareBottomBaselineAndMuteSitsAtTop() {
     let p = layout(.round, 480, 480)
     defer { p.close() }
     let rect = p.mediaRect!
     let (w, _, bytes) = raster(p, stamps: true)
+    // Читаем прозрачность пикселя по двум координатам. Проверка так различает нарисованную метку
+    // и пустое место на той же высоте.
     func alpha(_ x: Int, _ y: Int) -> UInt8 { bytes[(y * w + x) * 4 + 3] }
     XCTAssertGreaterThan(
       alpha(6, Int(rect.maxY) - 12), 0, "Duration hugs the left edge of the circle")
@@ -274,6 +311,8 @@ final class ResultMediaGeometryTests: XCTestCase {
       p.height - rect.maxY, 3, "Time is inside the message; no old extra status row")
   }
 
+  // Перебираем пустые, отрицательные и очень вытянутые размеры на всех поворотах. Высота и ширина
+  // должны оставаться конечными и помещать вложение внутрь сообщения.
   func testMediaGeometryPropertiesAcrossDimensionsAndOrientations() {
     for kind in [MessageKind.photo, .video, .gif, .round] {
       for bound in [80, 180, 304, 600] {
@@ -294,6 +333,8 @@ final class ResultMediaGeometryTests: XCTestCase {
     }
   }
 
+  // Считаем знаки времени для разных видов сообщений и исходов доставки. Проверяем, что
+  // доставленное сообщение не получает отметку о чтении и входящее не получает исходящие отметки.
   func testDeliveredStampCannotImplyReadAcrossTextAndMedia() {
     let a = Attachment(
       id: "receipt", relativePath: "receipt", mime: "video/mp4", byteSize: 100, rawWidth: 480,

@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Сверяет состав местной длинной истории, имена и отпечатки файлов, типы вложений и размер
+# изображений после чтения. Иначе проверки прокрутки могли бы пройти на неполном или облегчённом
+# наборе.
+
 from pathlib import Path
 from collections import Counter
 import hashlib, json, sys

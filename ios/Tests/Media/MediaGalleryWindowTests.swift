@@ -1,7 +1,12 @@
+// Проверяет порядок и выбор в ограниченной галерее айфона. Сценарии открывают смешанную историю,
+// длинный ряд и большой альбом.
+
 import XCTest
 @testable import Kandinsky
 
 final class MediaGalleryWindowTests: XCTestCase {
+  // Создаёт сообщение с заданным набором вложений и совпадающим временем у соседних строк. Это
+  // позволяет проверить порядок по номеру при равном времени.
   private func row(_ id: Int64, count: Int = 1, chat: Int64 = 2, kind: MessageKind = .photo)
     -> Message
   {
@@ -15,7 +20,8 @@ final class MediaGalleryWindowTests: XCTestCase {
           thumbnailKey: "")
       })
   }
-  /// История другого чата не должна попасть в это окно.
+  // Подаёт перемешанную страницу с дублями, голосом и чужим чатом. Проверяет порядок, отбор
+  // подходящих файлов и сохранение выбранного снимка.
   func testMixedHistoryMergePreservesSelectionAndOriginalAlbumOrder() {
     let seed = row(10, count: 3)
     var window = MediaGalleryWindow(seed: seed, attachmentIndex: 1)
@@ -30,11 +36,15 @@ final class MediaGalleryWindowTests: XCTestCase {
     XCTAssertFalse(window.merge(HistoryPage(rows: [row(14, chat: 3)], before: nil, after: nil)))
     XCTAssertEqual(window.selected?.caption, "Описание 10")
   }
+  // Проходит сотни шагов вперёд и назад, сравнивая выбор с заранее составленным рядом. Проверяет
+  // предел сохранённых и ближайших кадров.
   func testForwardReverseTraversalMatchesIndependentFlattenedHistoryAndStaysBounded() throws {
     let rows = (1...300).map { row(Int64($0), count: 1 + $0 % 4) }
     let expected = (1...300).flatMap { id in (0..<(1 + id % 4)).map { "\(id)/\($0)" } }
     var window = MediaGalleryWindow(seed: rows[69], attachmentIndex: 1)
     var reference = try XCTUnwrap(expected.firstIndex(of: "70/1"))
+    // Возвращает ограниченную порцию вокруг номера с признаками продолжения. Сценарий может много
+    // раз запросить следующую область без чтения полного ряда.
     func page(_ id: Int64) -> HistoryPage {
       let lower = max(0, min(Int(id) - 17, rows.count - 32)), upper = min(rows.count, lower + 32)
       return HistoryPage(
@@ -56,7 +66,8 @@ final class MediaGalleryWindowTests: XCTestCase {
       }
     }
   }
-  /// Повторно подаёт исходный альбом при нехватке окна.
+  // Идёт к концу и началу альбома больше окна, повторно подавая полное сообщение. Обрезанные
+  // вложения должны возвращаться в правильном порядке.
   func testOversizedAlbumCanBeTraversedWithoutLosingTrimmedAttachments() {
     let album = row(1, count: 200)
     var window = MediaGalleryWindow(seed: album, attachmentIndex: 150)
@@ -74,6 +85,8 @@ final class MediaGalleryWindowTests: XCTestCase {
     XCTAssertFalse(window.select("1/-1"))
     XCTAssertEqual(window.selected?.id, "1/0")
   }
+  // Удаляет текущий элемент и затем все оставшиеся. Проверяет выбор ближайшего и отсутствие кадра
+  // после полной очистки окна.
   func testDeletingSelectionChoosesAnAdjacentItemAndNeverImportsAnotherChat() {
     var window = MediaGalleryWindow(seed: row(3))
     _ = window.merge(HistoryPage(rows: [row(1), row(2), row(3), row(4)], before: nil, after: nil))

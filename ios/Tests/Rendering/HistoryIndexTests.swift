@@ -1,11 +1,18 @@
+// Проверяем расчёт положения сообщений и дат при больших историях и частичных загрузках. Сверяем
+// быстрый поиск с простым подсчётом высот.
+
 import XCTest
 @testable import Kandinsky
 @MainActor final class HistoryIndexTests: XCTestCase {
+  // Собираем запись с известным номером, порядком и высотой. Так ожидаемое положение можно
+  // посчитать заранее и сверить с быстрым поиском.
   private func row(_ id: Int64, _ height: Double = 44) -> IndexedRow {
     IndexedRow(
       messageID: id, order: OrderKey(sortKey: id, messageID: id), estimatedHeight: height,
       revision: 1)
   }
+  // Добавляем записи сверху, меняем высоту и удаляем строки. Проверяем сохранение читаемого
+  // сообщения и ограничение числа строк, удерживаемых окном загрузки.
   func testPrependDeleteResizeAndPageBounds() throws {
     let index = HistoryIndex()
     _ = try index.replace(
@@ -43,8 +50,11 @@ import XCTest
     window.apply(HistoryPage(rows: [], before: nil, after: nil), chatID: 4, generation: generation)
     XCTAssertEqual(window.loadedCount, 0)
   }
-  /// Слишком большой, повторный либо чужой набор не должен заменить действующие строки.
+  // Заполняем окно 384 известными строками. Повторные номера, чужой чат и слишком большой набор
+  // не должны заменить окно, а закрытое окно должно остаться пустым.
   func testSeedKnownRowsPreservesBoundsAndRejectsInvalidOrClosedSeeds() {
+    // Готовим строку с нужным номером и чатом. Возможность подставить чужой чат нужна для
+    // проверки границ окна.
     func message(_ id: Int64, _ chat: Int64 = 4) -> Message {
       Message(
         id: id, chatID: chat, order: OrderKey(sortKey: id, messageID: id), direction: .incoming,
@@ -67,6 +77,8 @@ import XCTest
     window.seedKnownRows(rows)
     XCTAssertEqual(window.loadedCount, 0)
   }
+  // Сверяем изменения с ожидаемыми числами из отдельного набора операций. На ста тысячах строк
+  // проверяем нижнюю границу, ограничение видимых фрагментов и очистку.
   func testIndependentLinearOracleAndHundredThousandIndex() throws {
     let index = HistoryIndex()
     var rows = (1...10000).map { row(Int64($0)) }
@@ -107,6 +119,8 @@ import XCTest
 }
 
 extension HistoryIndexTests {
+  // Сами складываем высоты сообщений и зазоры дат для трёх часовых поясов. Сверяем итоговую
+  // высоту, видимое сообщение и обратный пересчёт позиции.
   func testDecoratedLayoutMatchesIndependentCalendarAndLinearOracle() throws {
     for zone in ["UTC", "America/New_York", "Asia/Kathmandu"] {
       let tz = TimeZone(identifier: zone)!, index = HistoryIndex(dayGap: 32, timeZone: tz)
@@ -141,7 +155,8 @@ extension HistoryIndexTests {
       }
     }
   }
-  /// Пустая история не должна сохранять высоту и разделители.
+  // Проверяем, как верхний и нижний отступы и строки дат входят в общую высоту. При увеличении
+  // сообщения выше экрана точка чтения должна сместиться на ту же величину.
   func testDaySpaceInsetsAndHeightChangesPreserveAnchor() throws {
     let index = HistoryIndex(dayGap: 32, timeZone: TimeZone(secondsFromGMT: 0)!)
     index.configureInsets(top: 100, bottom: 90)
@@ -167,6 +182,7 @@ extension HistoryIndexTests {
     let anchor = index.anchorAt(offset: 275)
     XCTAssertEqual(try index.updateHeight(id: 1, height: 90, anchor: anchor, viewport: 100), 325)
     _ = try index.replace(rows: [], anchor: ReadingAnchor(), viewport: 100)
+    // После удаления всех записей не должно остаться места под даты и отступы.
     XCTAssertEqual(index.totalHeight, 0)
     XCTAssertTrue(index.days(offset: 0, height: 100).isEmpty)
   }

@@ -1,13 +1,18 @@
+// Хранит готовые чёткие кадры видео и небольшие копии для просмотра. Они позволяют вернуться к
+// ролику после очистки памяти или удаления скачанного исходника.
+
 import Foundation
 import CoreGraphics
 import CryptoKit
 import Darwin
 
-// Готовые пиксели позволяют вернуть чёткий кадр без повторного декодирования JPEG.
+// Готовые точки возвращают чёткий кадр без повторного чтения сжатого изображения.
 final class VideoCoverDiskCache: @unchecked Sendable {
   private static let gate = NSLock()
   private final class WeakCache {
     weak var value: VideoCoverDiskCache?
+    // Запоминает хранилище слабой ссылкой. Список живых владельцев нужен для отзыва, но сам
+    // список не должен удерживать закрытое хранилище.
     init(_ value: VideoCoverDiskCache) { self.value = value }
   }
   private static var active: [WeakCache] = []
@@ -17,6 +22,8 @@ final class VideoCoverDiskCache: @unchecked Sendable {
   private let epochGate = NSLock()
   private var revokedPaths: [String] = []
   private static let headerBytes = 88, maximumBytes = 4 * 1024 * 1024
+  // Запоминает корень и регистрирует текущего владельца среди живых. При удалении исходника нужно
+  // предупредить все открытые хранилища этого аккаунта.
   init(root: URL) {
     self.root = root
     Self.gate.lock()
@@ -24,14 +31,20 @@ final class VideoCoverDiskCache: @unchecked Sendable {
     Self.active.append(WeakCache(self))
     Self.gate.unlock()
   }
+  // Читает номер последнего отзыва под блокировкой. Подготовку кадра можно начать сейчас и
+  // проверить этот номер перед будущей записью.
   func epoch() -> UInt64 {
     epochGate.lock()
     defer { epochGate.unlock() }
     return deletionEpoch
   }
+  // Получает постоянный отпечаток текста для имени файла. Разделители пути не попадают в имя на
+  // диске.
   private static func hash(_ text: String) -> String {
     SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
   }
+  // Строит путь к папке кадров и отклоняет путь через ссылку. Иначе чтение или удаление вышло бы
+  // за пределы папки владельца.
   private static func directory(_ root: URL) throws -> URL {
     let url = root.appendingPathComponent("media/video-covers")
     guard url.resolvingSymlinksInPath().path == url.standardizedFileURL.path else {
@@ -39,9 +52,14 @@ final class VideoCoverDiskCache: @unchecked Sendable {
     }
     return url
   }
+  // Объединяет отпечаток исходника и ключ конкретного показа. Так можно отозвать все кадры одного
+  // файла и различать несколько его появлений в чате.
   private static func name(_ key: VideoPlaybackKey) -> String {
     hash(key.relativePath) + "-" + hash(key.cacheKey) + ".frame"
   }
+  // Проверяет отзыв и размеры, записывает описание и пиксели с контрольными суммами. Убирает
+  // остатки записи и старые кадры по числу и общему размеру, чтобы полезная копия не росла без
+  // предела.
   func store(_ image: CGImage, key: VideoPlaybackKey, epoch: UInt64? = nil) throws {
     Self.gate.lock()
     defer { Self.gate.unlock() }
@@ -85,7 +103,8 @@ final class VideoCoverDiskCache: @unchecked Sendable {
       size -= bytes
     }
   }
-  // A screen-sized still survives eviction of decoded images and of the downloaded original.
+  // Находит небольшой чёткий кадр, проверяет, что это обычный файл нужного размера, и отмечает
+  // чтение. Удалённый исходник не возвращается из этой копии.
   func galleryFile(_ relative: String) -> URL? {
     Self.gate.lock()
     defer { Self.gate.unlock() }
@@ -101,6 +120,8 @@ final class VideoCoverDiskCache: @unchecked Sendable {
     return file
   }
 
+  // Проверяет размер и номер отзыва и сохраняет готовую уменьшенную копию целиком. Старые копии
+  // убирает по времени, оставляя место новым.
   func storeGalleryFile(_ data: Data, relative: String, epoch: UInt64) throws {
     guard (1...262_144).contains(data.count) else { return }
     Self.gate.lock()
@@ -126,6 +147,8 @@ final class VideoCoverDiskCache: @unchecked Sendable {
     }
   }
 
+  // Проверяет файл и резервирует его размер в памяти до чтения, затем сверяет описание и обе
+  // контрольные суммы. Рисунок удерживает открытое отображение файла, пока нужен экрану.
   func readPixels(_ key: VideoPlaybackKey, budget: ImageByteBudget) -> ImagePixels? {
     Self.gate.lock()
     defer { Self.gate.unlock() }
@@ -146,6 +169,8 @@ final class VideoCoverDiskCache: @unchecked Sendable {
     guard let pointer, pointer != MAP_FAILED else { charge.close(); return nil }
     let mapped = Data(bytesNoCopy: pointer, count: count,
       deallocator: .custom { pointer, length in munmap(pointer, length) })
+    // Читает четыре байта заголовка в согласованном порядке. Так размеры и длина строки
+    // восстанавливаются одинаково при записи и чтении.
     func word(_ offset: Int) -> Int {
       Int(UInt32(mapped[offset]) | UInt32(mapped[offset + 1]) << 8
         | UInt32(mapped[offset + 2]) << 16 | UInt32(mapped[offset + 3]) << 24)
@@ -171,6 +196,8 @@ final class VideoCoverDiskCache: @unchecked Sendable {
     }
     return ImagePixels(image: image, charge: charge)
   }
+  // Закрывает запись и чтение, забывает отметки и снимает себя из списка живых владельцев.
+  // Следующее удаление не должно планировать работу для закрытой записи.
   func close() {
     Self.gate.lock()
     closed = true
@@ -178,6 +205,8 @@ final class VideoCoverDiskCache: @unchecked Sendable {
     Self.active.removeAll { $0.value == nil || $0.value === self }
     Self.gate.unlock()
   }
+  // Меняет номер отзыва у живых хранилищ того же корня и убирает все копии исходника по общему
+  // имени. Поздняя подготовка больше не запишет удалённый кадр обратно.
   static func revoke(root: URL, relativePath: String) throws {
     gate.lock()
     defer { gate.unlock() }

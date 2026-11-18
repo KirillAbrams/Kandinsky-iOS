@@ -1,3 +1,6 @@
+// Сохраняет уже размытые и подготовленные пиксели самых маленьких изображений на диске. Повторный
+// показ может обойтись без чтения и размытия сжатой картинки.
+
 import Foundation
 import Accelerate
 import CoreGraphics
@@ -13,6 +16,8 @@ enum TinyPreviewDiskCache {
   private static let recordMagic: [UInt8] = [0x57, 0x54, 0x49, 0x33]
   private static let directoryFlags = O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
 
+  // Находит ячейку по контрольной сумме входа и виду медиа. Если ячейка повреждена или занята
+  // другим изображением, готовит рисунок и по возможности записывает заново.
   static func image(_ data: Data, root: URL, video: Bool = false) throws -> CGImage {
     precondition(!Thread.isMainThread)
     guard data.count <= 3072 else { throw MediaError.corrupt }
@@ -35,6 +40,8 @@ enum TinyPreviewDiskCache {
     }
     return image
   }
+  // Открывает только местную папку владельца и спускается к хранилищу маленьких изображений.
+  // Проверка каждого шага не даёт пройти через ссылку.
   private static func openDirectory(_ root: URL) -> Int32 {
     guard root.isFileURL, (root.host ?? "").isEmpty else { return -1 }
     let profile = root.path.withCString { Darwin.open($0, directoryFlags) }
@@ -45,6 +52,8 @@ enum TinyPreviewDiskCache {
     defer { Darwin.close(media) }
     return openChildDirectory("tiny", parent: media)
   }
+  // Открывает настоящий вложенный каталог или создаёт его с доступом только владельцу. Другие
+  // сбои не превращаются в попытку записать по непроверенному пути.
   private static func openChildDirectory(_ name: String, parent: Int32) -> Int32 {
     name.withCString { path in
       let existing = Darwin.openat(parent, path, directoryFlags)
@@ -55,6 +64,8 @@ enum TinyPreviewDiskCache {
       return Darwin.openat(parent, path, directoryFlags)
     }
   }
+  // Проверяет размер исходных байтов и объявленные размеры до создания рисунка. Затем делает
+  // маленькую копию и сглаживает её перед увеличением на экране.
   static func prepare(_ data: Data, video: Bool = false) throws -> CGImage {
     guard data.count <= 3072,
       let source = CGImageSourceCreateWithData(
@@ -73,9 +84,13 @@ enum TinyPreviewDiskCache {
     return try softened(image, video: video)
   }
 
+  // Создаёт небольшие исходный и рабочий рисунки и сглаживает в два прохода. Для видео использует
+  // более сильное сглаживание, чтобы крупные точки на временном кадре были менее заметны.
   private static func softened(_ image: CGImage, video: Bool) throws -> CGImage {
     let width = image.width, height = image.height
     guard let space = CGColorSpace(name: CGColorSpace.sRGB) else { throw MediaError.io }
+    // Создаёт рабочее место для пикселей с одинаковым порядком цветов и прозрачности. Алгоритм
+    // ждёт ровно четыре байта на точку.
     func raster() -> CGContext? {
       CGContext(
         data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
@@ -109,6 +124,8 @@ enum TinyPreviewDiskCache {
     return result
   }
   /// Отдельно вычисляет отпечаток записанного рисунка, чтобы последующее чтение могло заметить повреждение.
+  // Записывает версию, размер, ключ входа и пиксели. Отдельная контрольная сумма пикселей
+  // помогает найти повреждение при следующем чтении.
   private static func record(_ image: CGImage, key: Data) -> Data? {
     let width = image.width, height = image.height
     guard (1...64).contains(width), (1...64).contains(height) else { return nil }
@@ -136,6 +153,8 @@ enum TinyPreviewDiskCache {
     }
     return rendered ? data : nil
   }
+  // Сверяет версию, ключ, длину и контрольную сумму, затем собирает рисунок из готовых байтов.
+  // Неверная запись не попадёт на экран вместо нужного файла.
   private static func restore(_ record: Data, key: Data) -> CGImage? {
     guard (headerSize...maximumRecord).contains(record.count),
       Array(record.prefix(4)) == recordMagic, record[6] == 1, record[7] == 0,
@@ -155,6 +174,8 @@ enum TinyPreviewDiskCache {
       space: space, bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
       provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent)
   }
+  // Открывает только обычный файл допустимого размера и читает все байты. При прерванной
+  // системной операции продолжает чтение, а неполную запись отбрасывает.
   private static func read(_ name: String, directory: Int32) -> Data? {
     let fd = name.withCString {
       Darwin.openat(directory, $0, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
@@ -179,9 +200,11 @@ enum TinyPreviewDiskCache {
     return complete ? data : nil
   }
   /// Только после полной записи заменяет целевую ячейку, чтобы читатель не получил половину нового рисунка.
+  // Записывает всю картинку во временную ячейку и меняет постоянное имя только после полной
+  // записи. Один временный файл ограничивает остатки после прерывания.
   private static func write(_ data: Data, name: String, directory: Int32) {
-    // One fixed pending file also bounds leftovers after a crash. The process-wide
-    // gate serializes writers, including two MediaStores retiring the same profile.
+    // Одно временное имя ограничивает остаток после сбоя. Общая блокировка разводит записи,
+    // даже если один профиль открыли два владельца хранилища.
     _ = Darwin.unlinkat(directory, "pending.rgba", 0)
     let fd = Darwin.openat(
       directory, "pending.rgba", O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)

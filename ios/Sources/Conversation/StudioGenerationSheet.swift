@@ -1,3 +1,7 @@
+// Нижняя панель на айфоне показывает выбор модели, источника файла и параметры генерации.
+// Настройки строятся по возможностям выбранной модели. Поля дополнительных условий проверяются до
+// применения, чтобы запрос с недопустимым значением не ушёл на сервер.
+
 import UIKit
 
 @MainActor final class StudioGenerationSheet: UIViewController {
@@ -28,6 +32,8 @@ import UIKit
   private let seed = StudioSettingsField(kind: .seed)
   private let error = UILabel()
 
+  // Начинаем с параметров текущего черновика и показываем панель поверх переписки. Так открытие
+  // формы не сбрасывает введённый запрос и экран остаётся виден под затемнением.
   init(options: KandinskyOptions) {
     self.options = options
     super.init(nibName: nil, bundle: nil)
@@ -35,9 +41,12 @@ import UIKit
     modalPresentationCapturesStatusBarAppearance = true
   }
 
+  // Панель получает настройки при создании через код. Загрузка из файла разметки без этих
+  // настроек не предусмотрена.
   required init?(coder: NSCoder) { fatalError("Use programmatic initializer") }
 
-  /// Наблюдает за клавиатурой, чтобы доступная область настроек менялась вместе с вводом.
+  // Создаём фон для закрытия, ручку жеста и прокручиваемый список. Отдельно включаем ограничение
+  // доступности панелью, чтобы озвучивание не уходило в закрытую переписку.
   override func viewDidLoad() {
     super.viewDidLoad()
     view.accessibilityViewIsModal = true
@@ -83,7 +92,8 @@ import UIKit
     ])
   }
 
-  /// При появлении клавиатуры прокручивает к редактируемому полю, чтобы введённый текст оставался виден.
+  // Измеряем содержимое под доступную ширину и высоту, оставляя место клавиатуре. При её
+  // появлении доводим прокрутку до редактируемого поля, чтобы текст остался виден.
   override func viewDidLayoutSubviews() {
     super.viewDidLayoutSubviews()
     let bounds = view.bounds
@@ -127,6 +137,8 @@ import UIKit
     }
   }
 
+  // Переводим конечную рамку клавиатуры в координаты панели и считаем перекрытие. Перестраиваем
+  // форму сразу, иначе нижнее поле осталось бы под клавиатурой.
   @objc private func keyboardChanged(_ notification: Notification) {
     guard let window = view.window,
       let frame = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect
@@ -137,18 +149,25 @@ import UIKit
     view.layoutIfNeeded()
   }
 
+  // Закрываем панель по системному жесту доступности и сообщаем, что жест обработан. Остаётся тот
+  // же путь закрытия, что и при касании фона.
   override func accessibilityPerformEscape() -> Bool {
     close()
     return true
   }
 
+  // Закрываем панель при движении вниз за верхнюю ручку. Жест назначен ручке, поэтому
+  // вертикальная прокрутка внутри формы по-прежнему работает.
   @objc private func swipedDown() { close() }
 
-  /// При наличии продолжения вызывает его после закрытия представления.
+  // Закрываем панель и выполняем переданное действие после завершения перехода. Следующий выбор
+  // файла может открыть другое окно, которому понадобится свободный экран.
   private func close(completion: (() -> Void)? = nil) {
     dismiss(animated: true, completion: completion)
   }
 
+  // Собираем список моделей из ответа слоя связи и отмечаем текущую галочкой. При пустом списке
+  // выводим причину вместо пустой панели.
   func showModels(_ models: [StudioModel], onSelect: @escaping (StudioModel) -> Void) {
     loadViewIfNeeded()
     sidePadding = 12
@@ -179,6 +198,8 @@ import UIKit
     }
   }
 
+  // Собираем выбор галереи, камеры и видео с ограничениями рядом с пунктом. Система выбора файла
+  // открывается после нажатия соответствующего пункта.
   func showAttachments(onSelect: @escaping (AttachmentSource) -> Void) {
     loadViewIfNeeded()
     sidePadding = 0
@@ -197,6 +218,8 @@ import UIKit
     ) { onSelect(.video) }
   }
 
+  // Добавляем до пяти недавних файлов, если панель ещё открыта. Проверка защищает от ответа сети,
+  // пришедшего после закрытия, а выбор возвращает уже известный объект загрузки.
   func appendRecentUploads(_ uploads: [StudioUpload], onSelect: @escaping (StudioUpload) -> Void) {
     guard !uploads.isEmpty, presentingViewController != nil else { return }
     let divider = UIView()
@@ -227,6 +250,8 @@ import UIKit
     view.setNeedsLayout()
   }
 
+  // Строим один пункт с названием, пояснением и галочкой выбранного значения. Озвучиваем всю
+  // строку как одну кнопку, закрываем панель и потом передаём выбранное действие.
   private func addTile(
     title: String, subtitle: String, icon: String, id: String? = nil,
     selected: Bool = false, onSelect: @escaping () -> Void
@@ -288,6 +313,9 @@ import UIKit
     stack.addArrangedSubview(button)
   }
 
+  // Приводим сохранённые настройки к возможностям модели и строим доступные группы. Число
+  // результатов уходит в черновик сразу. Кнопка подтверждения проверяет числовой ключ и
+  // возвращает остальные параметры только после проверки.
   func showSettings(
     _ available: StudioCapabilities, onCountChange: @escaping (Int) -> Void,
     onApply: @escaping (KandinskyOptions) -> Void
@@ -377,7 +405,8 @@ import UIKit
     stack.addArrangedSubview(done)
   }
 
-  /// Возвращает созданные элементы, чтобы зависимые подписи можно было обновить при смене пропорций.
+  // Создаём группу вариантов и снимаем выделение с остальных кнопок при выборе. Возвращаем ряд
+  // вызывающему коду, чтобы при смене пропорций он мог обновить подписи размеров.
   @discardableResult private func section(
     _ title: String, choices: [(String, String)], selected: String?, spacingAfter: CGFloat = 14,
     change: @escaping (String) -> Void
@@ -404,6 +433,8 @@ import UIKit
     return row
   }
 
+  // Переписываем подписи размеров для текущих пропорций. Идентификаторы вариантов остаются
+  // прежними, меняется только понятная человеку ширина и высота.
   private func updateDimensions(_ sizes: [StudioChoice]) {
     guard let row = dimensionRow else { return }
     for (size, button) in zip(sizes, row.buttons) {
@@ -411,6 +442,8 @@ import UIKit
     }
   }
 
+  // Собираем сворачиваемую часть формы с числовым ключом и разрешёнными настройками модели. При
+  // сворачивании закрываем ввод, иначе клавиатура могла бы остаться перед скрытым полем.
   private func addDetails(_ available: StudioCapabilities) {
     details.axis = .vertical
     let upperRule = UIView()
@@ -481,10 +514,14 @@ import UIKit
     }
   }
 
+  // Печатаем вес следования описанию с одним знаком после запятой. Так подпись показывает текущую
+  // ступень ползунка без лишних цифр.
   private func guidanceLabel(_ value: Double) -> String {
     "Следование описанию " + String(format: "%.1f", value)
   }
 
+  // Создаём подпись с общей окраской и заданным размером. Разрешаем перенос строк, чтобы
+  // пояснение укладывалось в ширину панели.
   private func label(_ text: String, size: CGFloat, weight: UIFont.Weight = .regular) -> UILabel {
     let result = UILabel()
     result.text = text
@@ -508,16 +545,25 @@ import UIKit
   var onHeightChange: (() -> Void)?
 
   var text: String {
+    // Читаем текст из редактора нужного вида. На пустом поле ключа возвращаем пустую строку,
+    // которую форма понимает как случайный ключ.
     get { kind == .seed ? seedEditor.text ?? "" : promptEditor.text }
+    // Записываем восстановленное значение в нужное поле и обновляем подсказку, счётчик и высоту.
+    // Без пересчёта заполненное поле могло бы выглядеть пустым.
     set {
       if kind == .seed { seedEditor.text = newValue } else { promptEditor.text = newValue }
       refresh()
     }
   }
 
+  // Определяем, которому полю нужна прокрутка над клавиатурой, по фокусу его редактора.
   var isEditing: Bool { seedEditor.isFirstResponder || promptEditor.isFirstResponder }
+  // Выносим подпись над текстом, если поле открыто или уже заполнено.
   private var floating: Bool { isEditing || !text.isEmpty }
 
+  // Выбираем однострочное числовое либо многострочное текстовое поле. Добавляем подпись,
+  // обработку касания и при необходимости счётчик, чтобы оба поля вели себя одинаково при
+  // получении фокуса.
   init(kind: Kind) {
     self.kind = kind
     super.init(frame: .zero)
@@ -565,8 +611,12 @@ import UIKit
     refresh()
   }
 
+  // Редактор создаётся из кода с известным видом поля. Сборка из файла разметки не передаёт этот
+  // вид.
   required init?(coder: NSCoder) { fatalError("Use programmatic initializer") }
 
+  // Измеряем перенос исключений и даём редактору до трёх строк. Дальнейший текст остаётся
+  // доступен через внутреннюю прокрутку, не выталкивая остальные параметры.
   func updateHeight(width: CGFloat) {
     guard kind == .negative else { return }
     let fit = promptEditor.sizeThatFits(
@@ -580,6 +630,8 @@ import UIKit
     if promptEditor.isScrollEnabled != scroll { promptEditor.isScrollEnabled = scroll }
   }
 
+  // Размещаем подпись и текст на одной плашке. При вводе поднимаем подпись над содержимым, а
+  // счётчик многострочного поля оставляем под плашкой.
   override func layoutSubviews() {
     super.layoutSubviews()
     let plateHeight = bounds.height - (kind == .negative ? 20 : 0)
@@ -597,6 +649,8 @@ import UIKit
     }
   }
 
+  // Передаём фокус установленному редактору при касании свободной части плашки. Клавиатура
+  // открывается одинаково и по тексту, и по краю поля.
   @objc private func focus() {
     if kind == .seed {
       seedEditor.becomeFirstResponder()
@@ -605,9 +659,15 @@ import UIKit
     }
   }
 
+  // Обновляем поднятую подпись и счётчик при входе в поле. Пользователь сразу видит, какое поле
+  // редактирует.
   func textViewDidBeginEditing(_ textView: UITextView) { refresh() }
+  // Возвращаем оформление поля после завершения ввода. У заполненного поля подпись остаётся над
+  // текстом, чтобы его не закрыть.
   func textViewDidEndEditing(_ textView: UITextView) { refresh() }
 
+  // Укорачиваем законченный текст до двух тысяч воспринимаемых символов и возвращаем курсор на
+  // допустимое место. Пока клавиатура собирает составной символ, обрезку откладываем.
   func textViewDidChange(_ textView: UITextView) {
     if textView.markedTextRange == nil && textView.text.count > 2000 {
       let selection = textView.selectedRange.location
@@ -618,6 +678,8 @@ import UIKit
     refresh()
   }
 
+  // Поднимаем и окрашиваем подпись по фокусу, показываем подсказку случайного ключа или обновляем
+  // счётчик исключений. Сообщаем панели о возможном изменении высоты многострочного поля.
   private func refresh() {
     caption.font = .systemFont(ofSize: floating ? 12 : 16)
     caption.textColor = isEditing ? KandinskyPalette.studioInk : KandinskyPalette.studioSheetHandle
@@ -636,8 +698,11 @@ import UIKit
   private let minimum: Double
   private let step: Double
   private var selectedStep: Int
+  // Переводим номер ступени в вес следования описанию из заданного диапазона.
   var value: Double { minimum + Double(selectedStep) * step }
 
+  // Делим допустимый диапазон веса на четырнадцать шагов и выбираем ближайший к сохранённому
+  // значению. Объявляем ползунок регулируемым, чтобы его можно было менять без точного касания.
   init(minimum: Double, maximum: Double, value: Double) {
     self.minimum = minimum
     step = (maximum - minimum) / Double(Self.steps)
@@ -652,8 +717,12 @@ import UIKit
     updateValueDescription()
   }
 
+  // Ползунок создаётся с числовыми пределами модели. Файл разметки не передаёт диапазон и
+  // начальную ступень.
   required init?(coder: NSCoder) { fatalError("Use programmatic initializer") }
 
+  // Рисуем серую дорожку, заполненную часть, деления и ручку. Положение вычисляем из выбранной
+  // ступени, так что графика и отправляемое число совпадают.
   override func draw(_ rect: CGRect) {
     let length = max(0, bounds.width - 52)
     guard length > 0 else { return }
@@ -681,24 +750,36 @@ import UIKit
     thumb.stroke()
   }
 
+  // Принимаем первое касание и сразу выбираем ступень под пальцем. Можно сразу перейти в нужное
+  // место, не захватывая старую ручку.
   override func beginTracking(_ touch: UITouch, with event: UIEvent?) -> Bool {
     update(with: touch)
     return true
   }
 
+  // Продолжаем изменять ступень по положению пальца. Движение ползунка не требует
+  // последовательных нажатий на деления.
   override func continueTracking(_ touch: UITouch, with event: UIEvent?) -> Bool {
     update(with: touch)
     return true
   }
 
+  // Переводим ползунок на один шаг выше по команде озвучивания. Предел проверяет общий выбор
+  // ступени.
   override func accessibilityIncrement() { select(selectedStep + 1) }
+  // Переводим ползунок на один шаг ниже по команде озвучивания. Общий выбор оставляет значение в
+  // разрешённом диапазоне.
   override func accessibilityDecrement() { select(selectedStep - 1) }
 
+  // Вычисляем долю горизонтального пути от начала дорожки и округляем её к ближайшему делению.
+  // Так ширина экрана не влияет на допустимые значения.
   private func update(with touch: UITouch) {
     let fraction = (touch.location(in: self).x - 26) / max(1, bounds.width - 52)
     select(Int((fraction * CGFloat(Self.steps)).rounded()))
   }
 
+  // Ограничиваем ступень диапазоном и обновляем рисунок, озвучивание и форму только при смене
+  // значения. Касание внутри прежнего деления не порождает второе изменение.
   private func select(_ index: Int) {
     let next = max(0, min(Self.steps, index))
     guard next != selectedStep else { return }
@@ -708,6 +789,8 @@ import UIKit
     sendActions(for: .valueChanged)
   }
 
+  // Записываем числовое значение в описание ползунка. Средства доступности могут сообщить текущую
+  // ступень после каждого изменения.
   private func updateValueDescription() {
     accessibilityValue = String(format: "%.1f", value)
   }
@@ -717,11 +800,15 @@ import UIKit
   private(set) var buttons: [StudioOptionButton] = []
   private var rowHeight: NSLayoutConstraint?
 
+  // Сохраняем кнопку в порядке вариантов и добавляем её в видимую строку. Затем одни и те же
+  // кнопки участвуют в измерении и выборе.
   func add(_ button: StudioOptionButton) {
     buttons.append(button)
     addSubview(button)
   }
 
+  // Берём нижний край последнего ряда кнопок и сообщаем его внешней форме как высоту. При
+  // переносе вариантов соседний раздел не перекрывается.
   func updateHeight(width: CGFloat) {
     let height = frames(width: width).last?.maxY ?? 0
     if let rowHeight {
@@ -734,11 +821,15 @@ import UIKit
     setNeedsLayout()
   }
 
+  // Расставляем кнопки по рассчитанным рамкам при фактической ширине. Этот же расчёт
+  // использовался для определения общей высоты.
   override func layoutSubviews() {
     super.layoutSubviews()
     for (button, frame) in zip(buttons, frames(width: bounds.width)) { button.frame = frame }
   }
 
+  // Размещаем кнопки слева направо и переносим очередную, если она не влезает. Ограничиваем
+  // ширину каждой кнопки, чтобы длинная подпись не вышла за границу.
   private func frames(width: CGFloat) -> [CGRect] {
     var x: CGFloat = 0
     var y: CGFloat = 0
@@ -768,6 +859,8 @@ import UIKit
   private let caption = UILabel()
   private let icon = UIImageView(image: StudioOptionButton.check)
 
+  // Собираем кнопку из отдельного фона, подписи и галочки. Для озвучивания оставляем один
+  // элемент, а дочерним рисункам касания не передаём.
   init(title: String, selected: Bool) {
     super.init(frame: .zero)
     accessibilityTraits = .button
@@ -783,14 +876,20 @@ import UIKit
     setSelected(selected)
   }
 
+  // Кнопка создаётся с названием и состоянием выбора. Загрузка из файла разметки такого вызова не
+  // предоставляет.
   required init?(coder: NSCoder) { fatalError("Use programmatic initializer") }
 
+  // Учитываем ширину подписи и запас для галочки при выбранном варианте.
   private var labelAndPaddingWidth: CGFloat {
     ceil(caption.intrinsicContentSize.width * 3) / 3 + (isSelected ? 54 : 34)
   }
 
+  // Оставляем у короткой подписи минимальную область касания.
   var fittedWidth: CGFloat { max(48, labelAndPaddingWidth) }
 
+  // Меняем видимую и озвучиваемую подпись вместе. Это важно для размеров, которые пересчитываются
+  // после выбора пропорций.
   func updateTitle(_ value: String) {
     accessibilityLabel = value
     caption.attributedText = NSAttributedString(
@@ -798,7 +897,8 @@ import UIKit
     setNeedsLayout()
   }
 
-  /// Запрашивает размещение, поскольку выбранная кнопка дополнительно содержит значок.
+  // Вместе меняем заливку, рамку, галочку и состояние для озвучивания. При появлении галочки
+  // заново размещаем подпись с нужным отступом.
   func setSelected(_ selected: Bool) {
     isSelected = selected
     pill.backgroundColor = selected ? Self.fill : .white
@@ -815,6 +915,8 @@ import UIKit
     setNeedsLayout()
   }
 
+  // Размещаем фон внутри области нажатия, оставляя место галочке выбранного варианта. Тогда текст
+  // не наезжает на знак даже при узкой кнопке.
   override func layoutSubviews() {
     super.layoutSubviews()
     let inset = max(0, (bounds.width - labelAndPaddingWidth) / 2)
@@ -825,6 +927,8 @@ import UIKit
       x: start, y: 14, width: max(0, bounds.width - start - inset - 17), height: 20)
   }
 
+  // Строим значок из ломаной линии заданного размера. Возвращаем готовую форму без привязки к
+  // цвету, чтобы стрелка и галочка менялись оформлением вместе с состоянием.
   private static func glyph(size: CGFloat, points: [(CGFloat, CGFloat)], lineWidth: CGFloat)
     -> UIImage
   {

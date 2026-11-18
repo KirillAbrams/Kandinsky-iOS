@@ -1,3 +1,6 @@
+// Описывает передаваемую карточку чата, страницу недавних и частичную правку свойств. Старые
+// ответы могут не содержать времени активности и признака генерации.
+
 import Foundation
 
 struct StudioThread: Codable, Equatable, Sendable {
@@ -10,6 +13,8 @@ struct StudioThread: Codable, Equatable, Sendable {
   let activityAtMs: Int64
   let generating: Bool
 
+  // Собирает поля карточки с заданными значениями времени и генерации, если их не передали.
+  // Виджет списка получает единый вид карточки и не читает сырой сетевой ответ.
   init(
     id: ChatID, title: String, lastSeq: Int64, unreadCount: Int64, pinned: Bool,
     archived: Bool, activityAtMs: Int64 = 0, generating: Bool = false
@@ -28,6 +33,8 @@ struct StudioThread: Codable, Equatable, Sendable {
     case id, title, lastSeq, unreadCount, pinned, archived, activityAtMs, generating
   }
 
+  // Читает обязательные поля и подставляет значения только для двух необязательных. Так прежняя
+  // форма ответа остаётся читаемой без потери важных признаков архива и закрепления.
   init(from decoder: Decoder) throws {
     let values = try decoder.container(keyedBy: CodingKeys.self)
     self.init(

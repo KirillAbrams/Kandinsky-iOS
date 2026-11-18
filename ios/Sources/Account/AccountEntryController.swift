@@ -1,12 +1,19 @@
+// Рисует форму входа на айфоне, выбирает видимые поля и передаёт введённые значения модели. По
+// шагам формы можно пройти при открытой клавиатуре.
+
 import UIKit
 
 @MainActor private final class AccountEntryBackdrop: UIView {
+  // Рисует белую подложку на всю область формы. Без заполнения сквозь окно могли бы проступить
+  // прежние слои.
   override func draw(_ rect: CGRect) {
     UIColor.white.setFill()
     UIRectFill(bounds)
   }
 }
 @MainActor private final class AccountEntryBrand: UIView {
+  // Рисует знак Кандинского в отведённой области, используя те же настройки, что и экран чата.
+  // Размер и размещение остаются одинаковыми при повторном показе формы.
   override func draw(_ rect: CGRect) {
     KandinskyPalette.studioBrand(x: 85, top: 8, placement: .welcome)
   }
@@ -18,11 +25,15 @@ import UIKit
   private let model: AccountEntryViewModel
   private var displayedStep = AccountEntryStep.login
 
+  // Создаёт модель формы из службы запросов и подготавливает окно, которое строится из кода.
+  // Форма не создаёт подключение самостоятельно.
   init(api: NetworkAPI) {
     model = AccountEntryViewModel(api: api)
     super.init(nibName: nil, bundle: nil)
   }
 
+  // Закрывает способ загрузки этой формы из сохранённой разметки. Для инициализации ей нужна явно
+  // переданная служба входа.
   @available(*, unavailable)
   required init?(coder: NSCoder) { fatalError("Storyboard не используется") }
   private let codeField = UITextField()
@@ -32,6 +43,8 @@ import UIKit
     error = UILabel()
   private let submit = UIButton(type: .system), toggle = UIButton(type: .system)
   private let passwordVisibility = UIButton(type: .system)
+  // Собирает прокручиваемую форму, поля, подсказки и кнопки сохранённых входов. Привязывает их к
+  // модели и держит форму над клавиатурой, чтобы кнопки оставались доступны.
   override func viewDidLoad() {
     super.viewDidLoad()
     let background = AccountEntryBackdrop()
@@ -195,6 +208,8 @@ import UIKit
     }
     update()
   }
+  // Обновляет подписи и видимость полей после смены шага, очищает старые пароль и код и запрещает
+  // нажатия во время запроса. Так код предыдущего шага не уйдёт в другой запрос.
   private func update() {
     let step = model.step
     let busy = model.isBusy
@@ -224,11 +239,15 @@ import UIKit
       submit.setTitle(step == .verifyRegistration ? "Зарегистрироваться" : "Сохранить пароль", for: .normal)
     }
   }
+  // Сверяет картинку кнопки и подпись для озвучивания с режимом поля. Пользователь слышит именно
+  // то действие, которое выполнит кнопка.
   private func updatePasswordVisibility() {
     let hidden = passwordField.isSecureTextEntry
     passwordVisibility.setImage(UIImage(systemName: hidden ? "eye" : "eye.slash"), for: .normal)
     passwordVisibility.accessibilityLabel = hidden ? "Показать пароль" : "Скрыть пароль"
   }
+  // Меняет скрытие пароля и возвращает текст с прежним выделением. Иначе переключение вывода
+  // могло бы потерять введённое или сдвинуть курсор.
   private func togglePasswordVisibility() {
     let password = passwordField.text
     let selection = passwordField.selectedTextRange
@@ -237,11 +256,15 @@ import UIKit
     passwordField.selectedTextRange = selection
     updatePasswordVisibility()
   }
+  // Считывает текущее содержимое полей и передаёт модели вместе с признаком повторного письма.
+  // Проверка остаётся общей для кнопки и клавиатуры.
   private func enter(resending: Bool = false) {
     model.submit(email: emailField.text ?? "", password: passwordField.text ?? "",
                  code: codeField.text ?? "", resending: resending)
   }
 
+  // Просит модель остановить работу и отсоединяет действия выбора и отмены. После ухода со
+  // страницы прежнее окно не получит ответ.
   func close() {
     model.close()
     selected = nil

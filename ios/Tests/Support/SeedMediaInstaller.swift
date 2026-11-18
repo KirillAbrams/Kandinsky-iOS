@@ -1,3 +1,6 @@
+// Копируем фото и видео из проверочного набора в отдельную местную папку. Сверяем размеры и
+// контрольные суммы до выдачи файлов проверкам.
+
 @testable import Kandinsky
 import Foundation
 import CryptoKit
@@ -12,6 +15,8 @@ enum SeedMediaInstaller {
     let chatId: Int64
     let files: [Record]
   }
+  // Читаем список вложений и проверяем допустимые имена, размер и общий объём. Так повреждённая
+  // опись не заставляет читать лишние файлы или занять неожиданно много места.
   private static func records(_ fixtures: URL) throws -> [Record] {
     let data = try Data(contentsOf: fixtures.appendingPathComponent("real-media/manifest.json"))
     guard data.count <= 262144 else { throw RepoError.corrupt }
@@ -37,6 +42,8 @@ enum SeedMediaInstaller {
     }
     return document.files
   }
+  // Порциями сравниваем длину и контрольную сумму. При превышении ожидаемой длины можно
+  // остановиться сразу, а равная длина отдельно не доказывает совпадение.
   private static func matches(_ file: URL, record: Record) throws -> Bool {
     let handle = try FileHandle(forReadingFrom: file)
     defer { try? handle.close() }
@@ -49,6 +56,8 @@ enum SeedMediaInstaller {
     return size == record.byteSize
       && hash.finalize().map { String(format: "%02x", $0) }.joined() == record.sha256
   }
+  // Публикуем проверенные файлы через временный путь и используем уже лежащие на месте копии
+  // только после сверки. Это не даёт проверке прочитать половину файла после сбоя установки.
   static func install(root: URL, fixtures: URL) throws {
     let values = try records(fixtures), fm = FileManager.default
     let directory = root.resolvingSymlinksInPath().standardizedFileURL.appendingPathComponent(

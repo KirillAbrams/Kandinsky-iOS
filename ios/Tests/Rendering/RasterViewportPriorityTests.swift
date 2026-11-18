@@ -1,9 +1,13 @@
+// Проверяем очередь подготовки рисунков при прокрутке. Рисунок видимого сообщения должен быть
+// готов раньше соседних, а порядок сообщений в ленте сохраняется.
+
 import XCTest
 import UIKit
 @testable import Kandinsky
 
 @MainActor final class RasterViewportPriorityTests: XCTestCase {
-  /// Приоритет подготовки не должен менять хронологический порядок сохранённых слоёв.
+  // Занимаем рабочий поток, ставим в очередь три настоящих рисунка и освобождаем поток. Сверяем,
+  // что первым приходит видимый рисунок, а сохранённые слои остаются в порядке истории.
   func testVisibleBodyPublishesBeforeQueuedOffscreenBodies() async throws {
     let h = try await RepositoryHarness.open()
     try await h.store.perform { db in

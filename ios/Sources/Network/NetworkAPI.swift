@@ -1,3 +1,6 @@
+// Подготавливает запросы к серверу, открывает постоянную связь и передаёт файлы. Проверяет адрес,
+// допустимый размер и целостность данных, чтобы закрытые сведения и вложения не ушли не туда.
+
 import CryptoKit
 import Foundation
 
@@ -7,10 +10,16 @@ struct NetworkFailure: Error {
 }
 private final class NetworkRedirectPolicy: NSObject, URLSessionTaskDelegate {
   private let finished: (@Sendable () -> Void)?
+  // Запоминает необязательное действие после сбора сведений о запросе. Сетевой клиент может
+  // учитывать завершённые передачи без участия экрана.
   init(finished: (@Sendable () -> Void)?) { self.finished = finished }
+  // Передаёт сигнал о сборе сведений о завершившемся запросе. Этот сигнал относится к связи,
+  // поэтому по нему нельзя считать генерацию законченной.
   func urlSession(
     _ session: URLSession, task: URLSessionTask, didFinishCollecting metrics: URLSessionTaskMetrics
   ) { finished?() }
+  // Отклоняет переход на другой адрес для обычных запросов. Так запрос с ключом доступа не
+  // отправится вслед за перенаправлением.
   func urlSession(
     _ session: URLSession, task: URLSessionTask,
     willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
@@ -20,11 +29,18 @@ private final class NetworkRedirectPolicy: NSObject, URLSessionTaskDelegate {
 private final class MediaDownloadProgress: NSObject, URLSessionDownloadDelegate {
   private let progress: @Sendable (Double) -> Void
   private var last = Date.distantPast
+  // Сохраняет действие, которое покажет ход скачивания. Оно получает долю выполненной передачи в
+  // ходе чтения.
   init(progress: @escaping @Sendable (Double) -> Void) { self.progress = progress }
+  // Принимает обязательное для загрузчика событие временного файла. Проверка и перемещение
+  // выполняются в ожидающем скачивании, поэтому здесь файл не открывается и не сохраняется
+  // повторно.
   func urlSession(
     _ session: URLSession, downloadTask: URLSessionDownloadTask,
     didFinishDownloadingTo location: URL
   ) {}
+  // Делит принятые байты на ожидаемые и ограничивает частоту обновления, сохраняя последний
+  // сигнал. Это уменьшает число обновлений экрана при скачивании.
   func urlSession(
     _ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64,
     totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64
@@ -41,10 +57,14 @@ private final class StudioUploadProgress: NSObject, URLSessionTaskDelegate {
   private let size: Int64
   private let progress: @Sendable (Double) -> Void
   private var last: TimeInterval = 0
+  // Запоминает размер отправляемого файла и способ сообщать ход. Известная длина даёт делитель
+  // даже при отсутствии сведений от сетевой службы.
   init(size: Int64, progress: @escaping @Sendable (Double) -> Void) {
     self.size = size
     self.progress = progress
   }
+  // Считает долю отправленных байтов и сообщает её с ограничением частоты. В конце значение не
+  // превышает полной передачи, даже если система насчитала больше байтов.
   func urlSession(
     _ session: URLSession, task: URLSessionTask, didSendBodyData bytesSent: Int64,
     totalBytesSent: Int64, totalBytesExpectedToSend: Int64
@@ -54,6 +74,8 @@ private final class StudioUploadProgress: NSObject, URLSessionTaskDelegate {
     last = now
     progress(min(1, Double(totalBytesSent) / Double(size)))
   }
+  // Отказывает в перенаправлении при отправке файла. Без этого исходник и заголовки запроса могли
+  // бы уйти на другой адрес.
   func urlSession(
     _ session: URLSession, task: URLSessionTask,
     willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
@@ -67,6 +89,8 @@ final class NetworkAPI: @unchecked Sendable {
   private let sourceSession: URLSession
   private let rangeHTTP: MediaRangeHTTP
   private let rangeObserved: (@Sendable (String, Int64, Int64, Int, Bool) -> Void)?
+  // Создаёт соединения для обычных запросов, медленных исходников и чтения отрезков. У обычного
+  // обмена короткое ожидание, а медленный исходник может передаваться дольше.
   init(
     profile: NetworkProfile?, onRequestFinished: (@Sendable () -> Void)? = nil,
     rangeObserved: (@Sendable (String, Int64, Int64, Int, Bool) -> Void)? = nil,
@@ -88,6 +112,8 @@ final class NetworkAPI: @unchecked Sendable {
       configuration: sourceConfig, delegate: NetworkRedirectPolicy(finished: onRequestFinished),
       delegateQueue: queue)
   }
+  // Выбирает временное соединение без общего хранения ответов и записей входа. Ограничивает число
+  // подключений и время ожидания, чтобы запросы не удерживали сеть без предела.
   private static func configuration(requestTimeout: TimeInterval, resourceTimeout: TimeInterval)
     -> URLSessionConfiguration
   {
@@ -101,6 +127,8 @@ final class NetworkAPI: @unchecked Sendable {
     return config
   }
   /// Проверяем адрес до добавления токена, чтобы токен получил только наш сервер.
+  // Принимает только путь службы на защищённом адресе своего сервера и затем добавляет ключ
+  // пользователя. Так неправильный путь не получит закрытые данные.
   private func request(_ path: String) throws -> URLRequest {
     guard path.hasPrefix("/v1/"),
       let url = URL(string: path, relativeTo: NetworkProfile.origin)?.absoluteURL,
@@ -114,6 +142,9 @@ final class NetworkAPI: @unchecked Sendable {
   }
   /// Сохраняет код серверного ответа в ошибке, чтобы синхронизация могла отличить потерю доступа от
   /// временного сбоя.
+  // Принимает ответ допустимого размера и сохраняет серверный признак ошибки. Для известного
+  // отказа входа уведомляет владельца сеанса, чтобы временная ошибка и потеря доступа
+  // обрабатывались по разным правилам.
   private func checked(_ data: Data, _ response: URLResponse) throws -> Data {
     guard data.count <= 2 * 1024 * 1024, let http = response as? HTTPURLResponse else {
       throw RepoError.io
@@ -130,7 +161,8 @@ final class NetworkAPI: @unchecked Sendable {
     }
     return data
   }
-  // Потеря соединения при чтении не меняет сервер. Достаточно одного повторного запроса.
+  // Повторяет одно чтение при потерянной связи или превышении времени и учитывает отмену.
+  // Отправки с изменениями не проходят через этот повтор, чтобы не продублировать запись.
   private func read<T>(_ fetch: () async throws -> T) async throws -> T {
     do { return try await fetch() } catch let error as URLError
       where [.networkConnectionLost, .timedOut].contains(error.code)
@@ -140,6 +172,8 @@ final class NetworkAPI: @unchecked Sendable {
     }
   }
 
+  // Готовит метод и данные запроса, повторяет чтение при временном отказе и проверяет ответ.
+  // Остальные методы идут один раз, чтобы решение о повторе оставалось у вызывающего кода.
   func json(_ path: String, body: Data? = nil, method: String? = nil) async throws -> Data {
     var request = try request(path)
     if let body {
@@ -157,6 +191,8 @@ final class NetworkAPI: @unchecked Sendable {
     let (data, response) = reply
     return try checked(data, response)
   }
+  // Проверяет вид приглашения и передаёт его вместе с именем устройства. Возвращает профиль
+  // доступа, который нужно сохранить для последующих запросов.
   func enroll(invitation: String, name: String) async throws -> NetworkProfile {
     guard invitation.count == 64, invitation.allSatisfy({ "0123456789abcdef".contains($0) }) else {
       throw RepoError.invalidInput
@@ -167,6 +203,9 @@ final class NetworkAPI: @unchecked Sendable {
     return try JSONDecoder().decode(
       NetworkProfile.self, from: await json("/v1/devices/enroll", body: body))
   }
+  // Проверяет размер файла, считает контрольную сумму небольшими порциями и отправляет с номером
+  // операции, чата или исходника. Для медленного исходника выбирает отдельное соединение, чтобы
+  // обычные запросы не ждали.
   func upload(
     file: URL, mime: String, id: String, studioSource: Bool = false,
     chat: ChatID? = nil, parent: String? = nil,
@@ -204,6 +243,9 @@ final class NetworkAPI: @unchecked Sendable {
       delegate: progress.map { StudioUploadProgress(size: Int64(size), progress: $0) })
     return try WireObject(data: checked(data, response))
   }
+  // Использует уже сохранённый файл или скачивает во временное место. Сверяет длину и при наличии
+  // контрольную сумму, затем перемещает файл на постоянный путь. Незавершённый файл по этому пути
+  // не появится.
   func download(
     blob: String, to destination: URL, limit: Int64, progress: (@Sendable (Double) -> Void)? = nil
   ) async throws {
@@ -247,6 +289,8 @@ final class NetworkAPI: @unchecked Sendable {
       try FileManager.default.moveItem(at: temporary, to: destination)
     }
   }
+  // Проверяет номер файла и границы небольшого отрезка, просит точные байты и сверяет ответ.
+  // Записывает сведения о чтении, чтобы отличить успешную передачу от отменённой.
   func range(blob: String, start: Int64, end: Int64, length: Int64, token: MediaCancellation) throws
     -> Data
   {
@@ -269,12 +313,16 @@ final class NetworkAPI: @unchecked Sendable {
   }
   /// Использует ту же сессию владельца, что и обычные запросы, чтобы команды и история относились к одной
   /// учётной записи.
+  // Открывает постоянное соединение с ключом того же профиля и ограничивает размер входящего
+  // пакета. Иначе команды могли бы попасть в чужой сеанс или занять память большим ответом.
   func socket() throws -> URLSessionWebSocketTask {
     let socket = session.webSocketTask(with: try request("/v1/ws"))
     socket.maximumMessageSize = 65536
     socket.resume()
     return socket
   }
+  // Переводит текст или байты постоянного соединения в данные и сверяет предел. Неизвестный или
+  // слишком большой пакет не попадает в разбор событий.
   func receive(_ socket: URLSessionWebSocketTask) async throws -> Data {
     let message = try await socket.receive()
     let data: Data
@@ -286,14 +334,20 @@ final class NetworkAPI: @unchecked Sendable {
     guard data.count <= 65536 else { throw RepoError.corrupt }
     return data
   }
+  // Разбирает полученные байты в проверяемый набор полей ответа. Некорректные данные вызывают
+  // ошибку до применения в базе.
   func object(_ data: Data) async throws -> WireObject { try WireObject(data: data) }
   /// Сохраняет устойчивый порядок полей, чтобы одинаковые данные не меняли запись только из-за порядка
   /// обхода словаря.
+  // Записывает поля с постоянным порядком. При одинаковом содержимом порядок словаря не должен
+  // менять байты пакета.
   func encode(_ value: [String: Any]) async throws -> Data {
     try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
   }
   /// Отдельное чтение участков видео тоже прекращается, чтобы закрытая учётная запись больше не
   /// продолжала старые запросы.
+  // Отменяет обычные запросы, передачи исходников и чтение отрезков. После закрытия аккаунта
+  // старое соединение не должно продолжать сетевую работу.
   func close() {
     rangeHTTP.close()
     session.invalidateAndCancel()
@@ -302,16 +356,22 @@ final class NetworkAPI: @unchecked Sendable {
 }
 
 extension NetworkAPI {
+  // Выбирает запрос для регистрации или восстановления и передаёт адрес. У этих действий разные
+  // правила и отдельные коды.
   func requestEmailCode(email: String, recovery: Bool) async throws {
     let path = recovery ? "/v1/demo/password-reset/request" : "/v1/demo/register/request"
     _ = try await json(path, body: JSONEncoder().encode(["email": email]))
   }
 
+  // Отправляет почту, проверочный код и новый пароль на подтверждение смены. Ошибка сервера
+  // передаётся экрану, чтобы он не показал успех раньше времени.
   func resetPassword(email: String, code: String, password: String) async throws {
     let body = try JSONEncoder().encode(["email": email, "code": code, "password": password])
     _ = try await json("/v1/demo/password-reset/confirm", body: body)
   }
 
+  // Выбирает вход с паролем или завершение регистрации с кодом. Разбирает возвращённый профиль,
+  // который используется для защищённых запросов.
   func signIn(email: String, password: String, registrationCode: String? = nil) async throws
     -> NetworkProfile
   {

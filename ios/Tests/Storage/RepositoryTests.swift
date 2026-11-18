@@ -1,8 +1,13 @@
+// Использует временную базу для проверки страниц, повтора отправки, обновления старой схемы и
+// сохранения черновиков.
+
 import XCTest
 import SQLite3
 @testable import Kandinsky
 
 final class RepositoryTests: XCTestCase {
+  // Даёт всем сообщениям одно время, затем проходит страницы фото, роликов и движущихся картинок
+  // в обе стороны. Ловит пропуски на равном времени и перестановку вложений альбома.
   func testVisualKeysetPagesSkipNonVisualRowsAndKeepAlbumOrder() async throws {
     let h = try await RepositoryHarness.open()
     try await h.store.perform { db in
@@ -54,6 +59,8 @@ final class RepositoryTests: XCTestCase {
     XCTAssertEqual(try h.integrity(), "ok")
     try await h.close()
   }
+  // Повторяет одну отправку до и после открытия файла, затем теряет ответ после сохранения
+  // второй. Проверяет сохранённые номера и итоговое число строк, чтобы повтор не создавал дубли.
   func testCommitRetryAndLostReplySurviveReopen() async throws {
     var h = try await RepositoryHarness.open()
     let command = SendCommand(operationID: "send-one", chatID: 2, text: "Привет 👋 O'Brien")
@@ -82,7 +89,8 @@ final class RepositoryTests: XCTestCase {
     XCTAssertEqual(try h.integrity(), "ok")
     try await h.close()
   }
-  /// Ни один отказ не должен изменить число сообщений, черновик и последнее описание чата.
+  // Подставляет сбой перед подтверждением, нехватку места и повтор того же номера с другим
+  // текстом. Проверяет, что остались прежнее сообщение, черновик и подпись карточки.
   func testRollbackFullAndPayloadMismatchPreserveState() async throws {
     let h = try await RepositoryHarness.open()
     _ = try await h.repo.send(SendCommand(operationID: "one", chatID: 2, text: "Сохранено"))
@@ -109,6 +117,8 @@ final class RepositoryTests: XCTestCase {
     XCTAssertEqual(chats.first?.lastPreview, "Сохранено")
     try await h.close()
   }
+  // Закрывает и открывает базу с черновиком и точкой чтения, затем ищет буквальные знаки и
+  // удаляет последнее сообщение. Проверяет, что подпись чата вернулась к предыдущей строке.
   func testDraftPositionDeleteAndLiteralSearch() async throws {
     var h = try await RepositoryHarness.open()
     let first = try await h.repo.send(
@@ -139,6 +149,8 @@ final class RepositoryTests: XCTestCase {
     XCTAssertEqual(try h.integrity(), "ok")
     try await h.close()
   }
+  // Открывает старую схему и проверяет новый номер, исходный текст, черновик и поиск по сообщению.
+  // Иначе можно обновить таблицы, но потерять доступ к прежним данным.
   func testLegacyMigrationPreservesMessageAndDraft() async throws {
     let root = try RepositoryHarness.legacyRoot()
     let h = try await RepositoryHarness.open(root: root)
@@ -153,6 +165,8 @@ final class RepositoryTests: XCTestCase {
     XCTAssertEqual(try h.integrity(), "ok")
     try await h.close()
   }
+  // Читает двести шестьдесят строк последовательными страницами и затем пишет старый черновик
+  // после нового. Выявляет пропуски страниц и перезапись свежего ввода.
   func testKeysetPagesAndNewerDraftRevision() async throws {
     let h = try await RepositoryHarness.open()
     for i in 1...260 {
@@ -175,7 +189,8 @@ final class RepositoryTests: XCTestCase {
     XCTAssertEqual(draft.text, "Новый")
     try await h.close()
   }
-  /// После закрытия хранилища новый запрос должен завершиться отменой.
+  // Передаёт пустой текст и путь к файлу вне папки, проверяет отсутствие строк и незакрытых
+  // запросов. После закрытия базы чтение должно завершиться отменой.
   func testInvalidInputAndNoLeakedStatements() async throws {
     let h = try await RepositoryHarness.open()
     for command in [

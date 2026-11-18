@@ -1,3 +1,6 @@
+// Объединяет просьбы показать один кадр в одну подготовку и загрузку. Видимый запрос может
+// отложить раннее чтение другого файла.
+
 import Foundation
 
 /// Одна передача и одно декодирование обслуживают всех владельцев одного кадра.
@@ -12,6 +15,8 @@ import Foundation
     let progress: (Double) -> Void
     let localMiss: () -> Void
     let completion: (Result<PreparedImage, Error>) -> Void
+    // Запоминает срочность и действия для отдельного получателя. У каждого экрана остаются свои
+    // ответы, даже если работа общая.
     init(
       _ priority: Int, _ progress: @escaping (Double) -> Void, _ localMiss: @escaping () -> Void,
       _ completion: @escaping (Result<PreparedImage, Error>) -> Void
@@ -32,6 +37,8 @@ import Foundation
     var running = false
     var remote = false
     var priority: Int { subscribers.values.map(\.priority).max() ?? 0 }
+    // Запоминает ключ кадра и способ начать подготовку. Следующий запрос с таким ключом может
+    // присоединиться к прежнему.
     init(_ key: String, _ start: @escaping Start) {
       self.key = key
       self.start = start
@@ -41,6 +48,8 @@ import Foundation
   private var order: [String] = []
   var onRemoteActivity: ((Bool) -> Void)?
 
+  // Находит открытую группу или создаёт её до предела, затем привязывает отмену отдельного
+  // получателя. Если последняя подписка исчезла, новый запрос не попадёт в уже закрытую передачу.
   func submit(
     key: String, priority: Int, progress: @escaping (Double) -> Void,
     localMiss: @escaping () -> Void = {},
@@ -93,6 +102,9 @@ import Foundation
     return subscriber.token
   }
 
+  // Начинает подготовку и при переходе к сети даёт видимым запросам преимущество. Перед выдачей
+  // удерживает кадр отдельно для всех получателей, чтобы первый из них мог закрыть экран без
+  // потери остальных ответов.
   private func launch(_ group: Group) {
     guard !group.owners.isClosed else { return }
     group.running = true
@@ -156,6 +168,8 @@ import Foundation
     if let work = group.work { group.owners.cancellation.onCancel { work.cancel() } }
   }
 
+  // Меняет номер попытки и отменяет работу, оставляя подписки. Это позволяет продолжить фоновый
+  // запрос позже и отбросить прежний ответ.
   private func pause(_ group: Group) {
     group.generation += 1
     group.running = false
@@ -163,6 +177,8 @@ import Foundation
     group.work?.cancel()
     group.work = nil
   }
+  // Убирает группу из карты и порядка ожидания, отменяет задачу и освобождает подписки. Новая
+  // работа по этому ключу начнётся отдельно.
   private func remove(_ group: Group) {
     groups.removeValue(forKey: group.key)
     order.removeAll { $0 == group.key }
@@ -170,6 +186,8 @@ import Foundation
     group.owners.close()
     group.subscribers.removeAll()
   }
+  // Снимает группу и сообщает отмену каждому оставшемуся получателю. Так ни один экран не ждёт
+  // ответа от уже закрытой работы.
   private func retire(_ group: Group) {
     let subscribers = Array(group.subscribers.values)
     remove(group)
@@ -178,6 +196,8 @@ import Foundation
       subscriber.completion(.failure(MediaError.cancelled))
     }
   }
+  // Запускает срочные группы и при свободной сети одну раннюю. Сообщает, осталась ли передача,
+  // чтобы подготовка видео могла уступить ей.
   private func resumeWaiting() {
     let waiting = order.compactMap { groups[$0] }.filter { !$0.running }
     for group in waiting where group.priority > 0 { launch(group) }
@@ -188,6 +208,8 @@ import Foundation
     }
     onRemoteActivity?(groups.values.contains(where: { $0.remote }))
   }
+  // Снимает все группы и сообщает, что сеть больше не занята картинками. Выход из чата прерывает
+  // даже общие запросы.
   func clear() {
     let active = Array(groups.values)
     for group in active { retire(group) }

@@ -1,8 +1,13 @@
+// Проверяет состав большого местного набора и повторное добавление его в тестовое хранилище
+// айфона.
+
 import XCTest
 import ImageIO
 import AVFoundation
 @testable import Kandinsky
 final class SeedTests: XCTestCase {
+  // Сверяет число файлов и сообщений каждого вида, открывает картинки, проверяет длительность и
+  // дорожки. Иначе большой тест мог бы пройти на отсутствующих или слишком лёгких файлах.
   func testCorpusFilesAndComposition() async throws {
     let directory = try XCTUnwrap(
       Bundle(for: RepositoryHarness.self).url(forResource: "fixtures", withExtension: nil),
@@ -47,7 +52,9 @@ final class SeedTests: XCTestCase {
     }
     XCTAssertGreaterThan(photoBytes, 48 * 1024 * 1024)
   }
-  /// Повтор не должен размножить исходные строки или удалить добавленное сообщение.
+  // Загружает десять тысяч строк, проверяет файлы вложений, добавляет своё сообщение и вновь
+  // открывает хранилище. Повтор должен оставить исходный набор и новое сообщение в одном
+  // экземпляре.
   func testSeedCompositionAndIdempotence() async throws {
     let corpus = try XCTUnwrap(
       Bundle(for: RepositoryHarness.self).url(forResource: "fixtures", withExtension: nil))

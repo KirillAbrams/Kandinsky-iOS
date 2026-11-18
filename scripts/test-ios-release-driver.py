@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
+# Проверяет, как копия плана замеров айфона выбирает сборку выпуска и какие библиотеки оставляет.
+# Все проверки работают со строками и не запускают приложение.
+
 import copy, unittest
 from pathlib import Path
 from ios_release_driver import patch_driver
 
 
 class DriverTest(unittest.TestCase):
+    # Создаёт условное описание запуска с вложенным набором проверок и переданными библиотеками.
+    # Так тест видит, какие части копии были заменены.
     def plan(self, injection):
         return {
             "Targets": [
@@ -16,6 +21,8 @@ class DriverTest(unittest.TestCase):
             ]
         }
 
+    # Сравнивает исходное описание с копией до правки и проверяет оба выходных пути. Приложение
+    # берётся из сборки выпуска, а тестовый набор остаётся отдельным.
     def test_release_paths_and_input_are_preserved(self):
         original = self.plan("/usr/lib/libRPAC.dylib")
         before = copy.deepcopy(original)
@@ -31,6 +38,8 @@ class DriverTest(unittest.TestCase):
             "/build/Debug-iphonesimulator/KandinskyUITests.xctest",
         )
 
+    # Передаёт проверку главного потока вместе с другой библиотекой. Сравнение обнаружит как
+    # оставшуюся проверку, так и удаление другой библиотеки.
     def test_removes_only_main_thread_checker(self):
         value = self.plan(
             "__SIMRUNTIMEROOT__/usr/lib/libMainThreadChecker.dylib:/usr/lib/libRPAC.dylib"
@@ -41,6 +50,8 @@ class DriverTest(unittest.TestCase):
             "/usr/lib/libRPAC.dylib",
         )
 
+    # Подставляет три разных средства поиска ошибок и ждёт отказа. Сборку с такой нагрузкой нельзя
+    # ошибочно считать обычной при замере.
     def test_rejects_sanitizer_injection(self):
         for name in ["asan", "tsan", "ubsan"]:
             with self.subTest(name=name), self.assertRaises(ValueError):

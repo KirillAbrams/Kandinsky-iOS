@@ -1,6 +1,12 @@
+// Готовит сетевую отправку сообщений из местных команд. Берёт сохранённые номера файлов до
+// загрузки и записывает новые после неё, чтобы не держать базу занятой во время ожидания сети.
+
 import Foundation
 
 extension NetworkSync {
+  // Читает номера ранее переданных вложений и принятых ответов, отдаёт подготовку за пределы
+  // потока экрана и сохраняет новые номера. Следующая попытка может воспользоваться ими без новой
+  // загрузки.
   func prepare(_ commands: [SendCommand]) async throws -> [[String: Any]] {
     let snapshot = try await store.perform {
       db -> (uploads: [String: (String, String?)], replies: [Int64: Int64]) in
@@ -46,6 +52,9 @@ extension NetworkSync {
     }
     return messages
   }
+  // Собирает ответ по номеру сервера и пропускает сообщение, чей адресат ещё не принят. Загружает
+  // отсутствующие оригиналы и копии, затем возвращает сетевые поля, не задерживая экран чтением
+  // файлов.
   nonisolated private static func encodeMessagesOffMain(
     _ commands: [SendCommand],
     snapshot: (uploads: [String: (String, String?)], replies: [Int64: Int64]), root: URL,

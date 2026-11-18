@@ -1,8 +1,12 @@
+// Место чтения на айфоне хранится по сообщению и смещению от области просмотра. У длинного текста
+// запоминаем конкретную строку, чтобы после смены ширины, клавиатуры или высоты сообщения не
+// потерять выбранный абзац.
+
 import UIKit
 
 extension ChatScrollHost {
-  /// Для подготовленного текстового сообщения дополнительно запоминает строку, чтобы изменение переноса
-  /// текста не уводило чтение.
+  // Используем ожидающую позицию при ещё не разобранной истории. Иначе снимаем верхнюю видимую
+  // точку, отмечаем близость к концу и по готовому тексту сохраняем место внутри строки.
   func readingAnchor(viewport: CGFloat? = nil) -> ReadingAnchor {
     if let pendingAnchor { return pendingAnchor }
     var value = index.anchorAt(offset: Double(max(0, viewportOffsetY + overlayTop)))
@@ -18,6 +22,9 @@ extension ChatScrollHost {
     return value
   }
 
+  // Восстанавливаем низ истории или координату сохранённого символа после нового переноса строк.
+  // Если текст ещё не готов, берём приблизительную позицию сообщения и ограничиваем её высотой
+  // ленты.
   private func resolved(_ anchor: ReadingAnchor) -> CGFloat {
     if anchor.followsBottom { return CGFloat(max(0, index.totalHeight - Double(bounds.height))) }
     if let id = anchor.messageID, let offset = anchor.textUTF16Offset, let row = loaded[id],
@@ -38,7 +45,9 @@ extension ChatScrollHost {
           - overlayTop))
   }
 
-  /// Учитывает верхнюю и нижнюю панели, чтобы содержимое не смещалось из выбранной точки.
+  // Обновляем размеры истории и возвращаем сохранённое место с учётом панелей. При сохранении
+  // движения переносим его в новые координаты. Иначе пересчёт высот мог бы оборвать инерцию или
+  // сдвинуть очередь подготовки.
   func setGeometry(anchor: ReadingAnchor, preservingMotion: Bool = false) {
     motionProbe.record(.geometryWillChange, preservingMotion: preservingMotion)
     defer { motionProbe.record(.geometryDidChange, preservingMotion: preservingMotion) }
@@ -65,6 +74,8 @@ extension ChatScrollHost {
     layoutPlane()
   }
 
+  // Подгоняем область отрисовки по ширине и высоте всей ленты. Размер не меняем, если рамка та
+  // же, чтобы не запускать лишнюю раскладку.
   func layoutPlane() {
     let frame = CGRect(
       origin: .zero,
@@ -72,6 +83,8 @@ extension ChatScrollHost {
     if plane.frame != frame { plane.frame = frame }
   }
 
+  // Сначала снимаем позицию чтения, затем ограничиваем новые отступы доступным окном. После
+  // обновления полосы прокрутки возвращаем ту же позицию и готовим кадр заново.
   func updateOverlayInsets(top: CGFloat, bottom: CGFloat) {
     guard top != overlayTop || bottom != overlayBottom else { return }
     let anchor = readingAnchor()

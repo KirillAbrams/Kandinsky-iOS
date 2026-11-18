@@ -1,3 +1,6 @@
+// Сравниваем текущие настройки рисования шрифта с другим набором настроек на тех же сообщениях.
+// Сверяем вид текста и измеряем затраты на рабочем потоке.
+
 import XCTest
 import UIKit
 import Darwin
@@ -12,6 +15,8 @@ import Darwin
     let messageId: Int64, sortKey: Int64, savedAtMs: Int64
     let text: String, direction: String
   }
+  // Рисуем один кусок подготовленного текста в тройном масштабе. По признаку включаем выбранные
+  // правила сглаживания и размещения знаков, сохраняя одинаковую геометрию.
   private nonisolated static func raster(_ prepared: PreparedText, part: Int, telegram: Bool) throws
     -> CGImage
   {
@@ -35,6 +40,8 @@ import Darwin
     prepared.draw(part: part, in: c)
     return try XCTUnwrap(c.makeImage())
   }
+  // Складываем время приложения и системы на измеряемом потоке. Возвращаем секунды, чтобы
+  // сравнивать затраты на рисование отдельно от ожидания других потоков.
   private nonisolated static func cpu() throws -> Double {
     var info = thread_basic_info_data_t(),
       count = mach_msg_type_number_t(
@@ -52,6 +59,8 @@ import Darwin
     return Double(info.user_time.seconds) + Double(info.system_time.seconds) + Double(
       info.user_time.microseconds + info.system_time.microseconds) / 1_000_000
   }
+  // Приводим картинку к одному цвету и порядку четырёх составляющих пикселя. Сравниваем полные
+  // байты, включая прозрачность краёв букв.
   private func pixels(_ image: CGImage) throws -> [UInt8] {
     let c = try XCTUnwrap(
       CGContext(
@@ -64,6 +73,8 @@ import Darwin
         start: try XCTUnwrap(c.data).assumingMemoryBound(to: UInt8.self),
         count: image.width * image.height * 4))
   }
+  // Рисуем бытовые примеры из сохранённой истории обоими способами и сверяем размер, среднюю
+  // ошибку цвета и прозрачность. Замеры относятся только к рисованию этих блоков.
   func testCompareTelegramFontPolicyWithoutChangingProduct() async throws {
     let fixtures = try XCTUnwrap(
       Bundle(for: RepositoryHarness.self).url(forResource: "fixtures", withExtension: nil))
@@ -120,6 +131,8 @@ import Darwin
     let batches: [[String: Double]] = try await withCheckedThrowingContinuation { reply in
       worker.async {
         do {
+          // Повторно рисуем те же блоки с одним набором настроек и сохраняем время и площадь
+          // изображений. Площадь позволяет проверить, что сравнивается одинаковый объём.
           func batch(_ policy: Bool) throws -> [String: Double] {
             let start = ProcessInfo.processInfo.systemUptime, cpuStart = try Self.cpu()
             var work = 0

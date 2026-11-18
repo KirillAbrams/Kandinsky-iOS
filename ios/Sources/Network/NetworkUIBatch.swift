@@ -1,9 +1,14 @@
+// Собирает пришедшие почти одновременно правки списка сообщений и передаёт их экрану одной
+// порцией. Это уменьшает число обновлений при чтении и догрузке истории.
+
 import Foundation
 
 @MainActor final class NetworkUIBatch {
   private var pending: [ChatID: MessageDelta] = [:]
   private var flush: DispatchWorkItem?
   var deliver: (([MessageDelta]) -> Void)?
+  // Для каждого чата объединяет новые версии и удаления по номерам строк. Назначает одну
+  // доставку примерно через один кадр вместо пересчёта экрана после каждого отдельного ответа.
   func offer(_ deltas: [MessageDelta]) {
     for delta in deltas {
       guard let prior = pending[delta.chat.id] else {
@@ -32,7 +37,8 @@ import Foundation
     flush = work
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.016, execute: work)
   }
-  /// После закрытия прежняя отложенная порция больше не должна обновлять представление.
+  /// Отменяет запланированную доставку, очищает порцию и убирает получателя.
+  /// Опоздавшее обновление не должно попасть в закрытый экран.
   func close() {
     flush?.cancel()
     flush = nil

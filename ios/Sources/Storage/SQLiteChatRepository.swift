@@ -1,3 +1,6 @@
+// Выполняет чтение и запись чата в местной базе. Здесь собираются страницы истории, сохраняются
+// черновики и точка чтения, а отправку можно повторить после потери ответа.
+
 import Foundation
 import CryptoKit
 import SQLite3
@@ -8,12 +11,16 @@ typealias AttachmentLocationReader =
 final class SQLiteChatRepository: ChatRepository, @unchecked Sendable {
   let store: SQLiteStore
   private let journal: LocalChangeJournal?
+  // Связывает хранилище с необязательной очередью обмена. С очередью местное действие будет
+  // передано серверу, без неё запись нужна только на телефоне.
   init(store: SQLiteStore, journal: LocalChangeJournal? = nil) {
     self.store = store
     self.journal = journal
   }
   private static let columns =
     "id,chatId,sortKey,kind,text,caption,replyToId,revision,savedAt,direction,deliveryState"
+  // Выбирает короткий текст последнего сообщения для списка чатов. Для вложения без подписи
+  // подставляет название вида файла, чтобы строка не выглядела пустой.
   private static func preview(_ row: SQLRow) -> String {
     if row["lastId"]?.optionalInt == nil { return "Сообщений пока нет" }
     let text = row["lastText"]?.string ?? "", caption = row["lastCaption"]?.string ?? ""
@@ -24,6 +31,9 @@ final class SQLiteChatRepository: ChatRepository, @unchecked Sendable {
       "round": "Видеокружочек", "gif": "GIF", "sticker": "Стикер"
     ][row["lastKind"]?.string ?? ""] ?? ""
   }
+  // Читает карточки вместе с последним сообщением, ставит закреплённые первыми и остальные
+  // сортирует по активности. Без соединения таблиц пришлось бы отдельно загружать сообщение для
+  // каждой карточки.
   private static func summaries(_ db: SQLiteConnection) throws -> [ChatSummary] {
     try db.rows(
       """
@@ -41,14 +51,16 @@ final class SQLiteChatRepository: ChatRepository, @unchecked Sendable {
         unreadCount: Int($0["unreadCount"]!.int), pinned: $0["pinned"]!.int != 0)
     }
   }
-  /// Если такого чата нет, возвращает ошибку отсутствующей записи, чтобы последующее действие не создало
-  /// данные для чужого номера.
+  // Находит карточку по номеру и сообщает об отсутствии чата. Дальнейшая команда не продолжит
+  // работу с несуществующей записью.
   static func summary(_ db: SQLiteConnection, _ id: ChatID) throws -> ChatSummary {
     guard let value = try summaries(db).first(where: { $0.id == id }) else {
       throw RepoError.notFound
     }
     return value
   }
+  // Проверяет чат, сбрасывает непрочитанные сообщения и записывает событие для сервера внутри
+  // одной операции базы. Счётчик и очередь тогда не разойдутся при сбое.
   func markRead(chatID: ChatID) async throws {
     try await store.perform { [journal] db in
       try db.transaction {
@@ -58,6 +70,8 @@ final class SQLiteChatRepository: ChatRepository, @unchecked Sendable {
       }
     }
   }
+  // Читает карточки на очереди базы и оставляет названия, совпавшие с запросом без учёта
+  // регистра. Пустой запрос показывает все чаты.
   func chats(matching query: String) async throws -> [ChatSummary] {
     try await store.perform { db in
       try Self.summaries(db).filter {
@@ -65,7 +79,9 @@ final class SQLiteChatRepository: ChatRepository, @unchecked Sendable {
       }
     }
   }
-  /// Сохраняет порядок вложений, чтобы результаты альбома не менялись местами после повторного открытия.
+  // Собирает строки сообщений, вложения в исходном порядке и сведения о ходе генерации для
+  // подходящих ответов. Без устойчивого порядка снимки в альбоме менялись бы местами после
+  // открытия.
   static func messages(
     _ db: SQLiteConnection, _ rows: [SQLRow], locations: AttachmentLocationReader? = nil
   ) throws -> [Message] {
@@ -152,6 +168,8 @@ final class SQLiteChatRepository: ChatRepository, @unchecked Sendable {
         studioGeneration: generations[id])
     }
   }
+  // Загружает одно сообщение с его вложениями по номеру. Явная ошибка при отсутствии не даёт
+  // команде подставить выдуманное сообщение.
   private static func message(_ db: SQLiteConnection, _ id: MessageID) throws -> Message {
     guard
       let value = try messages(
@@ -160,8 +178,8 @@ final class SQLiteChatRepository: ChatRepository, @unchecked Sendable {
     else { throw RepoError.notFound }
     return value
   }
-  /// Использует одновременно порядок сообщения и его номер, чтобы одинаковое время не приводило к
-  /// пропуску на границе страницы.
+  // Строит границу по порядку и номеру сообщения. Если время двух сообщений совпадает, номер
+  // сохраняет обе строки по разные стороны границы.
   private static func range(_ anchor: OrderKey, older: Bool) -> (String, [SQLValue]) {
     let op = older ? "<" : ">"
     return (
@@ -169,9 +187,13 @@ final class SQLiteChatRepository: ChatRepository, @unchecked Sendable {
       [.integer(anchor.sortKey), .integer(anchor.sortKey), .integer(anchor.messageID)]
     )
   }
+  // Читает местную страницу через общий загрузчик без адресов удалённых вложений. Этого хватает
+  // для данных, которые уже есть на телефоне.
   func history(_ request: PageRequest) async throws -> HistoryPage {
     try await history(request, locations: nil)
   }
+  // Проверяет предел страницы и при необходимости берёт строки с обеих сторон точки чтения.
+  // Добавляет адреса вложений для сети, если их передали, и сообщает, есть ли соседние страницы.
   func history(_ request: PageRequest, locations: AttachmentLocationReader?) async throws
     -> HistoryPage
   {
@@ -179,6 +201,8 @@ final class SQLiteChatRepository: ChatRepository, @unchecked Sendable {
     return try await store.perform { db in
       _ = try Self.summary(db, request.chatID)
       let visual = request.visualOnly ? " AND kind IN ('photo','video','gif')" : ""
+      // Читает ограниченную порцию с одной стороны от границы. Старые строки сначала выбирает в
+      // обратном порядке и затем переставляет, чтобы экран получил их по времени.
       func query(_ anchor: OrderKey?, _ older: Bool, _ limit: Int) throws -> [SQLRow] {
         var sql = "SELECT " + Self.columns + " FROM messages WHERE chatId=?" + visual
         var values: [SQLValue] = [.integer(request.chatID)]
@@ -206,6 +230,8 @@ final class SQLiteChatRepository: ChatRepository, @unchecked Sendable {
         rows = try query(request.anchor, request.direction != .newer, request.limit)
       }
       let items = try Self.messages(db, rows, locations: locations)
+      // Ищет хотя бы одну строку за краем страницы. Возвращает ключ только при наличии
+      // продолжения, иначе экран напрасно запрашивал бы пустые страницы.
       func more(_ key: OrderKey?, _ older: Bool) throws -> OrderKey? {
         guard let key else { return nil }
         let condition = Self.range(key, older: older)
@@ -219,6 +245,8 @@ final class SQLiteChatRepository: ChatRepository, @unchecked Sendable {
         after: try more(items.last?.order, false))
     }
   }
+  // Читает номера, порядок, версии и примерную высоту строк без текста и файлов. По этим
+  // сведениям длинная лента может быстро оценить своё положение.
   func index(chatID: ChatID) async throws -> [IndexedRow] {
     try await store.perform { db in
       _ = try Self.summary(db, chatID)
@@ -246,6 +274,8 @@ final class SQLiteChatRepository: ChatRepository, @unchecked Sendable {
       return output
     }
   }
+  // Отклоняет пустую или чрезмерную отправку и проверяет, что каждый указанный файл существует
+  // внутри папки вложений. Иначе битая команда могла бы попасть в историю.
   private static func validate(_ c: SendCommand, _ root: URL) throws {
     guard !c.operationID.isEmpty, c.operationID.utf8.count <= 128, c.text.utf8.count <= 262144,
       c.caption.utf8.count <= 262144,
@@ -266,8 +296,8 @@ final class SQLiteChatRepository: ChatRepository, @unchecked Sendable {
       }
     }
   }
-  /// В отпечаток входят данные отправки. Заново созданная миниатюра не должна превращать повтор в другой
-  /// запрос.
+  // Вычисляет отпечаток содержимого без номера операции, маленького изображения и формы звука.
+  // Повтор с обновлённой копией для предпросмотра останется той же отправкой.
   private static func payloadHash(_ c: SendCommand) throws -> String {
     let data = try JSONEncoder().encode(c)
     var object = try JSONSerialization.jsonObject(with: data) as! [String: Any]
@@ -283,8 +313,9 @@ final class SQLiteChatRepository: ChatRepository, @unchecked Sendable {
     let canonical = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
     return SHA256.hash(data: canonical).map { String(format: "%02x", $0) }.joined()
   }
-  /// Ответ возвращает после подтверждения записи, поэтому потеря ответа не приводит к потере самого
-  /// сообщения.
+  // Сначала ищет уже обработанный номер, затем одной записью создаёт сообщение, файлы и очередь
+  // обмена. Если ответ пропал после подтверждения, повтор получит прежнее сообщение по
+  // сохранённому номеру.
   func send(_ command: SendCommand) async throws -> MessageDelta {
     try await store.perform { [store, journal] db in
       try Self.validate(command, store.root)
@@ -355,6 +386,8 @@ final class SQLiteChatRepository: ChatRepository, @unchecked Sendable {
       return delta
     }
   }
+  // Сохраняет намерение об удалении, убирает сообщение и заново определяет последнюю строку чата.
+  // Общая запись защищает список и историю от частичного удаления.
   func delete(messageID: MessageID) async throws -> MessageDelta {
     try await store.perform { [journal] db in
       try db.transaction {
@@ -373,6 +406,8 @@ final class SQLiteChatRepository: ChatRepository, @unchecked Sendable {
       }
     }
   }
+  // Ищет буквальный текст в сообщениях выбранного чата и возвращает не более ста двадцати восьми
+  // номеров. Граница для продолжения не даёт повторять прежние результаты.
   func search(chatID: ChatID, text: String, before: OrderKey?) async throws -> [MessageID] {
     if text.isEmpty { return [] }
     return try await store.perform { db in
@@ -388,8 +423,8 @@ final class SQLiteChatRepository: ChatRepository, @unchecked Sendable {
       return try db.rows(sql, values).map { $0["id"]!.int }
     }
   }
-  /// Отдельный состав незавершённой группы файлов сохраняет вместе с черновиком, чтобы восстановить его
-  /// после перезапуска.
+  // Сравнивает версии черновика и сохраняет новый ввод вместе со списком начатой отправки.
+  // Запоздалая запись не должна затереть более свежую правку.
   func saveDraft(chatID: ChatID, draft: Draft) async throws {
     guard draft.text.utf8.count <= 262144, draft.revision >= 0 else { throw RepoError.invalidInput }
     let data = try JSONEncoder().encode(draft), json = String(decoding: data, as: UTF8.self)
@@ -415,6 +450,9 @@ final class SQLiteChatRepository: ChatRepository, @unchecked Sendable {
       }
     }
   }
+  // Читает объёмную запись черновика, при старом формате берёт обычный текст и отдельно
+  // восстанавливает выбор файлов. Без последнего шага начатая подготовка вложений могла бы
+  // пропасть.
   func draft(chatID: ChatID) async throws -> Draft {
     try await store.perform { db in
       let row = try db.rows(
@@ -430,6 +468,8 @@ final class SQLiteChatRepository: ChatRepository, @unchecked Sendable {
       return draft
     }
   }
+  // Проверяет долю строки, смещение и версию раскладки перед записью точки чтения чата.
+  // Повреждённая точка тогда не отправит экран за пределы истории.
   func savePosition(chatID: ChatID, anchor: ReadingAnchor) async throws {
     guard anchor.fraction.isFinite, (0...1).contains(anchor.fraction), anchor.screenDelta.isFinite,
       abs(anchor.screenDelta) <= 8192, (anchor.textUTF16Offset ?? 0) >= 0, anchor.layoutVersion >= 1
@@ -449,6 +489,8 @@ final class SQLiteChatRepository: ChatRepository, @unchecked Sendable {
         ])
     }
   }
+  // Возвращает точку чтения из местной таблицы. Различает отсутствие записи и повреждение, чтобы
+  // их не принять за одинаковый случай при открытии.
   func position(chatID: ChatID) async throws -> ReadingAnchor? {
     try await store.perform { db in
       guard

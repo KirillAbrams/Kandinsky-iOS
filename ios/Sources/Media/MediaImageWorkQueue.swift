@@ -1,3 +1,6 @@
+// Разводит поиск местного файла, скачивание и чтение пикселей по разным очередям. Долгая сеть не
+// занимает работника, который нужен готовому файлу.
+
 import Foundation
 
 /// Поиск на диске и ожидание сети не занимают исполнителя, который готовит пиксели.
@@ -9,6 +12,8 @@ import Foundation
   private var requests: [UUID: MediaCancellation] = [:]
   private var closed = false
 
+  // Ставит поиск местной копии, при необходимости запускает отдельно скачивание и только потом
+  // чтение пикселей. Сигнал отмены доходит до каждого начатого шага.
   func submit(
     priority: Int, fetch: MediaCancellation,
     local: @escaping (MediaCancellation) throws -> Source?,
@@ -20,6 +25,8 @@ import Foundation
   ) -> MediaCancellation {
     let identity = UUID(), request = MediaCancellation()
     requests[identity] = request
+    // Убирает запрос из списка и прекращает поиск файла, затем отдаёт результат действующему
+    // получателю. Если получатель ушёл, освобождает изображение сам.
     func finish(_ result: Result<ImagePixels, Error>) {
       requests.removeValue(forKey: identity)
       fetch.cancel()
@@ -30,6 +37,8 @@ import Foundation
         completion(.failure(MediaError.cancelled))
       }
     }
+    // Перед чтением пикселей снова резервирует место и проверяет отмену. При ошибке снимает
+    // резерв, иначе последующая загрузка считала бы освободившуюся память занятой.
     func prepare(_ source: Source) {
       guard !closed, !request.isCancelled else {
         finish(.failure(MediaError.cancelled))
@@ -81,6 +90,8 @@ import Foundation
     return request
   }
 
+  // Отменяет текущие запросы и закрывает все три очереди. Запоздалые изображения не должны
+  // вернуться к закрытому владельцу.
   func close() {
     guard !closed else { return }
     closed = true

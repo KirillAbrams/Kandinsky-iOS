@@ -1,7 +1,12 @@
+// Проверяет выбор места после удаления и историю после копирования и удаления запроса. Тесты
+// используют отдельные данные айфона.
+
 import XCTest
 @testable import Kandinsky
 
 @MainActor final class MessageActionsTests: XCTestCase {
+  // Удаляет строки с обеих сторон текущего места и сверяет выбор следующей либо предыдущей.
+  // Сохранённая строка не должна терять своё смещение.
   func testDeletedReadingAnchorChoosesNeighbor() {
     let rows = (1...3).map { n in
       IndexedRow(
@@ -19,6 +24,8 @@ import XCTest
     XCTAssertEqual(ReadingAnchorResolver.afterRemoving(anchor, rows: rows, removed: [1]), anchor)
   }
 
+  // Копирует текст с разными знаками и удаляет исходную строку после отправки следующей. Черновик
+  // теряет только ссылку, а новая история сохраняется после открытия базы.
   func testPromptCopyAndRemovalPreserveDraftAndFollowingHistory() async throws {
     var harness = try await RepositoryHarness.open()
     let source = "Поиск 👨‍👩‍👧‍👦 é العربية"

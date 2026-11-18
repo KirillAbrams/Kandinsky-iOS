@@ -1,3 +1,6 @@
+// Общие цвета и рисование надписей на айфоне собраны в одном месте. Знак с названием использует
+// свою раскладку в заголовке, боковом меню и приветствии.
+
 import CoreText
 import UIKit
 
@@ -22,6 +25,8 @@ enum KandinskyPalette {
     case toolbar, drawer, welcome
   }
 
+  // Подготавливаем строку названия нужного шрифта и расстояния между буквами. Готовую строку
+  // потом можно переиспользовать при рисовании знака.
   private static func studioTitle(fontSize: CGFloat, spacing: CGFloat) -> CTLine {
     let attributes: [NSAttributedString.Key: Any] = [
       .font: UIFont.systemFont(ofSize: fontSize, weight: .semibold),
@@ -37,6 +42,8 @@ enum KandinskyPalette {
   private static let studioDrawerTitle = studioTitle(fontSize: 20, spacing: -0.7)
   private static let studioWelcomeTitle = studioTitle(fontSize: 25, spacing: -0.7)
 
+  // Выбираем размеры и исходную линию текста по месту. Рисуем знак из фигур и отдельно ставим
+  // подготовленное название в нужную рамку.
   static func studioBrand(x: CGFloat, top: CGFloat, placement: StudioBrandPlacement = .toolbar) {
     // В исходном оформлении три места знака используют разные унаследованные параметры строки
     let (size, width, baseline, verticalScale, title): (CGFloat, CGFloat, CGFloat, CGFloat, CTLine)
@@ -81,6 +88,8 @@ enum KandinskyPalette {
     CTLineDraw(title, context)
   }
   static let empty = UIColor(red: 0.87, green: 0.96, blue: 0.89, alpha: 0.97)
+  // Рисуем строку в указанном прямоугольнике с нужным выравниванием и переносом. Системный шрифт
+  // берём через общий выбор для согласованного показа символов.
   static func text(
     _ text: String, in rect: CGRect, size: CGFloat, color: UIColor = .black,
     weight: UIFont.Weight = .regular, alignment: NSTextAlignment = .left

@@ -1,6 +1,11 @@
+// Записывает первый снимок сервера, следующие события и страницы истории в базу телефона. Экран
+// получает изменения после успешной записи.
+
 import Foundation
 
 extension NetworkStore {
+  // Сравнивает карточки до и после применения событий. Удаление скрытого чата тоже требует
+  // обновить открытый список, даже если сервер не прислал его карточку.
   func directoryEvents(_ db: SQLiteConnection, data: Data) throws
     -> (changes: [MessageDelta], directoryChanged: Bool)
   {
@@ -14,6 +19,8 @@ extension NetworkStore {
     return (changes, try retired || before != directoryState(db, keys: keys))
   }
 
+  // Читает только карточки из переданного набора и сортирует их по ключу. Устойчивый порядок
+  // нужен для сравнения, иначе перестановка ответов выглядела бы как изменение.
   private func directoryState(_ db: SQLiteConnection, keys: [String]) throws -> [String] {
     guard !keys.isEmpty else { return [] }
     let placeholders = Array(repeating: "?", count: keys.count).joined(separator: ",")
@@ -23,6 +30,8 @@ extension NetworkStore {
     ).map { $0["key"]!.string + ":" + $0["value"]!.string }
   }
 
+  // Сверяет версию ответа и владельца, затем записывает чаты, сообщения и номер продолжения за
+  // один раз. При ошибке приложение не получит половину начального состояния.
   func bootstrap(_ db: SQLiteConnection, data: Data) throws -> [MessageDelta] {
     let json = try WireObject(data: data)
     return try db.transaction {
@@ -44,8 +53,9 @@ extension NetworkStore {
     }
   }
 
-  // Курсор и сообщения записываются вместе. Если в событиях пропуск, телефон запросит историю от
-  // последнего подтверждённого номера.
+  // Пропускает уже учтённые события, требует непрерывную последовательность и применяет
+  // добавления и удаления. Записывает номер продолжения вместе с данными, чтобы при пропуске или
+  // сбое телефон мог запросить события с прежнего места.
   func events(_ db: SQLiteConnection, data: Data) throws -> [MessageDelta] {
     let json = try WireObject(data: data)
     return try db.transaction {
@@ -133,7 +143,8 @@ extension NetworkStore {
     }
   }
 
-  // Страница может пересекаться с уже полученными событиями. Сверяем номера и версии до обновления экрана.
+  // Принимает только сообщения нужного чата и сводит их с уже полученными событиями. Записывает
+  // признак более старых страниц и возвращает изменения, которые можно показать без дублей.
   func history(_ db: SQLiteConnection, chat: Int64, data: Data) throws -> [MessageDelta] {
     let json = try WireObject(data: data)
     return try db.transaction {

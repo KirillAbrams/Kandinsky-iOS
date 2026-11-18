@@ -1,3 +1,6 @@
+// Связывает выбор и съёмку файлов с черновиком и загрузкой в сеть. Следит за тем, кому
+// принадлежит временная копия и когда её можно убрать.
+
 import PhotosUI
 import UIKit
 
@@ -23,11 +26,15 @@ enum AttachmentSource { case photo, camera, video }
   private var closed = false
   private var lastSourceAttempt: String?
 
+  // Показывает, что задача чтения или передачи ещё держит выбор файла.
   var isImporting: Bool { importTask != nil }
+  // Принимает действия только до закрытия и пока экран находится в окне.
   private var isActive: Bool { !closed && view?.window != nil }
   private static let cameraOrGalleryError =
     "Не удалось открыть камеру или галерею. Проверьте разрешения."
 
+  // Принимает состояние чата, хранилище и действия экрана. Выбор файла работает с текущим
+  // владельцем и может показать ход передачи без собственного окна.
   init(
     view: UIView, state: ConversationState, media: MediaStore, admission: MediaAdmission,
     presenter: @escaping () -> UIViewController?, options: @escaping () -> KandinskyOptions,
@@ -49,6 +56,9 @@ enum AttachmentSource { case photo, camera, video }
     self.prepareDraft = prepareDraft
   }
 
+  // Проверяет первое фото черновика и спрашивает, есть ли у него запись загрузки. При
+  // восстановлении связи разрешает новую попытку, но не повторяет отправку того же файла без
+  // причины.
   func resumePendingUpload(reconnected: Bool = false) {
     guard isActive, state.isReady, importTask == nil, let network,
       let source = state.draft.attachmentDrafts.first, source.mime.hasPrefix("image/")
@@ -70,12 +80,18 @@ enum AttachmentSource { case photo, camera, video }
     }
   }
 
+  // Останавливает текущую съёмку, если она ещё открыта. Камера не должна работать после ухода из
+  // переписки.
   func stopCapture() { capture?.cancel() }
 
+  // Отменяет задачу только при активной передаче. Так приостановка загрузки не отменяет другой
+  // выбор файла без необходимости.
   func pausePendingUpload() {
     if transferID != nil { importTask?.cancel() }
   }
 
+  // Запрещает дальнейшие действия, отменяет съёмку и чтение файла. Убирает копии из черновика
+  // только когда вызывающий экран просит отказаться от самого черновика.
   func close(discardDraft: Bool) {
     closed = true
     stopCapture()
@@ -86,6 +102,8 @@ enum AttachmentSource { case photo, camera, video }
     }
   }
 
+  // Открывает список камеры и файлов, если чат видим и поверх него ещё нет окна. Позднее
+  // добавляет доступные недавние загрузки в ту же панель.
   func showPicker() {
     guard isActive, let presenter = presenter(), presenter.presentedViewController == nil,
       let network
@@ -105,6 +123,8 @@ enum AttachmentSource { case photo, camera, video }
     }
   }
 
+  // Открывает съёмку и отправляет принятый кадр на загрузку. Если чат уже закрыт или больше не
+  // принимает результат, убирает незакреплённую копию.
   private func openCamera(from presenter: UIViewController) {
     let media = self.media
     let admission = self.admission
@@ -141,6 +161,8 @@ enum AttachmentSource { case photo, camera, video }
     }
   }
 
+  // Открывает системную галерею с одним выбором и подходящим видом файла. Приложению не нужно
+  // самостоятельно просматривать всю галерею.
   private func pickFile(_ source: AttachmentSource, from presenter: UIViewController) {
     var configuration = PHPickerConfiguration(photoLibrary: .shared())
     configuration.filter = source == .video ? .videos : .images
@@ -151,7 +173,8 @@ enum AttachmentSource { case photo, camera, video }
     presenter.present(picker, animated: true)
   }
 
-  // У недавнего файла уже есть номер на сервере. Привязываем к нему местную копию.
+  // Привязывает существующий серверный файл к чату и получает местную копию с ограничением
+  // размера. После записи связи не передаёт этот файл серверу ещё раз.
   private func selectRecent(_ upload: StudioUpload) {
     guard isActive, importTask == nil, let network else { return }
     let media = self.media
@@ -195,6 +218,8 @@ enum AttachmentSource { case photo, camera, video }
     state.onChange?()
   }
 
+  // Ставит снимок в черновик или снимает его и отменяет передачу. Выбирает параметры для фото как
+  // исходника и уходит с режима улучшения, если исходник убрали.
   func replacePhoto(_ photo: AttachmentDraft?) {
     if photo == nil {
       importTask?.cancel()
@@ -206,6 +231,8 @@ enum AttachmentSource { case photo, camera, video }
       model: photo == nil ? (options().model == "video_sr" ? "image" : options().model) : "video")
   }
 
+  // Обновляет список исходников и подходящие настройки, сохраняя размер кадра, число и начальное
+  // число там, где они применимы. Перед уборкой старых файлов просит сохранить новый черновик.
   private func replaceSource(_ source: AttachmentDraft?, model: String) {
     let options = self.options()
     var draft = state.draft
@@ -227,7 +254,8 @@ enum AttachmentSource { case photo, camera, video }
     }
   }
 
-  // Если сеть пропала, фото остаётся в черновике для следующей отправки. Видео требует загрузки перед просмотром.
+  // Проверяет размер и длительность, сохраняет фото в черновик и передаёт файл по номеру чата.
+  // При некоторых обрывах фото остаётся для повтора, а видео открывается после загрузки.
   private func upload(_ file: AttachmentDraft, media: MediaStore) async {
     let isPhoto = file.mime.hasPrefix("image/")
     let valid =
@@ -303,6 +331,8 @@ enum AttachmentSource { case photo, camera, video }
     if isPhoto { replacePhoto(file) } else { preview(file, media: media) }
   }
 
+  // Создаёт данные для просмотра и предлагает улучшение только у подходящего короткого ролика.
+  // Проверяет наличие модели перед выбором исходника и убирает файл при отказе от просмотра.
   private func preview(_ file: AttachmentDraft, media: MediaStore) {
     let attachment = Attachment(
       id: file.id, relativePath: file.relativePath, mime: file.mime, byteSize: file.byteSize,
@@ -338,6 +368,8 @@ enum AttachmentSource { case photo, camera, video }
       } : nil
     previewVideo(attachment, enhance) { Task { try? await media.discardUnpublishedImport(file) } }
   }
+  // Закрывает галерею и принимает первый выбранный файл, если чат всё ещё активен. Отмена или
+  // поздний ответ не запускает импорт.
   func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
     let provider = results.first?.itemProvider
     picker.dismiss(animated: true) { [weak self] in
@@ -347,6 +379,8 @@ enum AttachmentSource { case photo, camera, video }
     }
   }
 
+  // Переносит разрешённый системой файл в хранилище и передаёт его на загрузку. При закрытии чата
+  // очищает подготовленную копию, чтобы она не осталась без владельца.
   private func importFile(_ provider: NSItemProvider, media: MediaStore) {
     guard importTask == nil else { return }
     importTask = Task { [weak self] in

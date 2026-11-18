@@ -1,6 +1,13 @@
+// Поддерживает местный перечень чатов, загружает поиск и передаёт изменения открытому экрану.
+// Учитывает номер соединения и отсечку событий, чтобы опоздавший снимок не затёр более свежие
+// данные.
+
 import Foundation
 
 extension NetworkSync {
+  // Читает известные номера и границу событий, затем загружает недавние чаты и состояние
+  // известных порциями. Сверяет соединение перед записью и показом. Архивные и более старые чаты
+  // не считаются удалёнными только из-за отсутствия в недавних.
   func refreshStudioDirectory() async throws {
     let connection = connectionEpoch
     let (known, startedAtCursor) = try await store.perform { [cache] in
@@ -27,6 +34,8 @@ extension NetworkSync {
     onStudioRecentChanged?()
   }
 
+  // Отправляет сохранённый номер черновика, проверяет форму ответа и записывает карточку местно.
+  // Экран получает изменения после записи, поэтому созданный чат можно открыть сразу.
   func createStudioThread(id threadID: UUID) async throws -> ChatID {
     guard !closed else { throw CancellationError() }
     let body = try JSONEncoder().encode(["id": threadID.uuidString.lowercased()])
@@ -42,7 +51,9 @@ extension NetworkSync {
     return id
   }
 
-  // При потере ответа повторяем запрос с тем же номером черновика.
+  // При временной ошибке ждёт и повторяет запрос с тем же номером черновика. Это позволяет
+  // получить уже созданный чат при потере ответа. После закрытия сеанса и при остальных ошибках
+  // повтор прекращается.
   private func submitStudioThread(_ body: Data) async throws -> Data {
     let delays: [UInt64] = [300_000_000, 800_000_000]
     for delay in delays {
@@ -66,9 +77,13 @@ extension NetworkSync {
     return try await api.json("/v1/demo/chats", body: body)
   }
 
+  // Читает сохранённую страницу недавних из местной базы. Список можно показать до обновления по
+  // сети.
   func cachedStudioRecent() async throws -> StudioRecentPage {
     try await store.perform { [cache] in try cache.studioRecent($0) }
   }
+  // Передаёт раздел, поисковую строку и границы страницы на сервер. Кодирует знак плюса отдельно,
+  // чтобы при поиске он сохранился и не превратился в пробел.
   func studioThreads(view: String, query: String, offset: Int, limit: Int) async throws
     -> [StudioThread]
   {
@@ -84,6 +99,8 @@ extension NetworkSync {
     guard let relative = path.string else { throw RepoError.invalidInput }
     return try JSONDecoder().decode(Page.self, from: await api.json(relative)).threads
   }
+  // Записывает полученную карточку и сохраняет служебные отметки списка. Экран может открыть
+  // выбранный чат, не сбрасывая результаты последней сверки.
   func admitStudioThread(_ thread: StudioThread) async throws {
     let data = try JSONEncoder().encode(["chats": [thread]])
     let deltas = try await store.perform { [cache] in
@@ -92,11 +109,16 @@ extension NetworkSync {
     guard !closed else { throw CancellationError() }
     ui.offer(deltas)
   }
+  // Отправляет изменение на сервер и сохраняет карточку из его ответа. Так экран использует
+  // подтверждённые название, архив или закрепление.
   func changeStudioThread(_ id: ChatID, change: StudioThreadChange) async throws {
     let data = try await api.json(
       "/v1/kandinsky/threads/\(id)", body: JSONEncoder().encode(change), method: "PATCH")
     try await admitStudioThread(JSONDecoder().decode(StudioThread.self, from: data))
   }
+  // После подтверждения сервером убирает чат из местной базы и собирает сведения об удалённых
+  // сообщениях в одной записи. Экран получает событие только после этого, иначе при повторном
+  // открытии мог бы прочитать старые строки.
   func deleteStudioThread(_ id: ChatID) async throws {
     _ = try await api.json("/v1/kandinsky/threads/\(id)", method: "DELETE")
     let deltas = try await store.perform { [cache] db in

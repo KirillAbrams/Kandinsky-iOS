@@ -1,3 +1,6 @@
+// Ограничивает число тихих роликов ленты. Видимые получают место первыми, ближайший невидимый
+// может подготовиться при наличии свободного места.
+
 import Foundation
 
 /// Ближайшие ролики остаются на паузе. Новое видимое видео вытесняет самое давнее невидимое.
@@ -9,6 +12,8 @@ import Foundation
   private var triedPreparation = false
   private var limit = 2
 
+  // Принимает ключи видимых роликов и общий предел, отмечает новую видимость и убирает закрытые
+  // записи. Если мест стало меньше, вытесняет невидимые.
   func beginFrame(
     visibleKeys: [VideoPlaybackKey], limit: Int, preparing: VideoPlaybackKey? = nil
   ) {
@@ -29,6 +34,8 @@ import Foundation
     while entries.count > self.limit && evictPaused() {}
   }
 
+  // Возвращает живой показ нужного ролика или создаёт его при свободном месте. Для одного
+  // ближайшего невидимого ролика делает только одну попытку подготовки.
   func preview(_ key: VideoPlaybackKey, create: () -> SilentVideoPreview) -> SilentVideoPreview? {
     let onScreen = visible.contains(key)
     guard onScreen || key == preparing && visible.count < limit else { return nil }
@@ -53,6 +60,8 @@ import Foundation
     return owner
   }
 
+  // Освобождает самый давний невидимый ролик. Видимый кадр не должен исчезнуть только потому, что
+  // появился новый запрос.
   @discardableResult private func evictPaused() -> Bool {
     guard let key = order.first(where: { !visible.contains($0) }) else { return false }
     order.removeAll { $0 == key }
@@ -60,6 +69,8 @@ import Foundation
     return true
   }
 
+  // Обнуляет список и закрывает всех владельцев роликов. После ухода из ленты не остаётся
+  // фонового проигрывания.
   func clear() {
     let old = Array(entries.values)
     entries.removeAll()

@@ -1,6 +1,11 @@
+// Показывает боковой список чатов на айфоне. Недавние чаты читает из сохранённого списка, а архив
+// и поиск подгружает порциями. Через эту панель пользователь меняет чаты и управляет входом.
+
 import UIKit
 
 private final class StudioHistoryBrand: UIView {
+  // Рисует знак Кандинского в верхней части панели тем же способом, что и в остальных окнах. Так
+  // оформление не зависит от повторного открытия истории.
   override func draw(_ rect: CGRect) {
     KandinskyPalette.studioBrand(x: bounds.minX, top: 0, placement: .drawer)
   }
@@ -52,6 +57,8 @@ final class StudioHistoryController: UIViewController, UITableViewDataSource, UI
   private var loadTask: Task<Void, Never>?
   private var loadID = 0
 
+  // Запоминает действующую службу, текущий чат и команды перехода. Сама панель показывает список
+  // поверх чата и передаёт смену экрана его владельцу.
   init(
     network: NetworkSync, selected: ChatID?, onOpen: @escaping (ChatID) -> Void,
     onCompose: @escaping () -> Void, onLogout: @escaping () -> Void,
@@ -68,8 +75,12 @@ final class StudioHistoryController: UIViewController, UITableViewDataSource, UI
     modalPresentationStyle = .overFullScreen
   }
 
+  // Останавливает создание из сохранённой разметки. Без действующей службы и команд перехода
+  // панель не сможет открывать и менять чаты.
   required init?(coder: NSCoder) { fatalError("Use programmatic initializer") }
 
+  // Создаёт поиск, архив, таблицу и команды аккаунта, затем подписывает панель на изменения
+  // списка. Недавние чаты обновляются из местной копии после события, пока панель открыта.
   override func viewDidLoad() {
     super.viewDidLoad()
     view.backgroundColor = .clear
@@ -230,6 +241,8 @@ final class StudioHistoryController: UIViewController, UITableViewDataSource, UI
     reload()
   }
 
+  // Расставляет кнопки и список между верхней полосой и нижним краем над клавиатурой.
+  // Пересчитывает нижнюю строку, чтобы она подходила новой ширине таблицы.
   override func viewDidLayoutSubviews() {
     super.viewDidLayoutSubviews()
     scrim.frame = view.bounds
@@ -255,7 +268,8 @@ final class StudioHistoryController: UIViewController, UITableViewDataSource, UI
     updateFooter()
   }
 
-  /// Перед началом получает окончательные размеры, чтобы движение соответствовало ширине панели.
+  // Сначала раскладывает окно, затем начинает движение от края на ширину готовой панели. Так
+  // панель появляется из нужного места даже при другой ширине экрана.
   func enter() {
     view.layoutIfNeeded()
     panel.transform = CGAffineTransform(translationX: -panel.bounds.width, y: 0)
@@ -267,6 +281,8 @@ final class StudioHistoryController: UIViewController, UITableViewDataSource, UI
     }
   }
 
+  // Прячет клавиатуру, прекращает загрузку и отключает действия до закрытия. Команда открытия или
+  // выхода выполняется только после снятия панели.
   private func leave(then action: (() -> Void)? = nil) {
     view.endEditing(true)
     guard presentingViewController != nil, !leaving else { return }
@@ -284,11 +300,15 @@ final class StudioHistoryController: UIViewController, UITableViewDataSource, UI
     }
   }
 
+  // Обрабатывает жест закрытия для служб доступности тем же путём, что и кнопка. Панель корректно
+  // вернёт управление прежнему экрану.
   override func accessibilityPerformEscape() -> Bool {
     leave()
     return true
   }
 
+  // Считает длину после предполагаемой замены и разрешает не более ста символов. Вставка длинной
+  // строки не обходит ограничение поиска.
   func textField(
     _ textField: UITextField, shouldChangeCharactersIn range: NSRange,
     replacementString string: String
@@ -296,12 +316,15 @@ final class StudioHistoryController: UIViewController, UITableViewDataSource, UI
     ((textField.text ?? "") as NSString).replacingCharacters(in: range, with: string).count <= 100
   }
 
-  /// Снимает фокус с поля, чтобы система убрала клавиатуру.
+  // Снимает фокус по кнопке клавиатуры. Уже введённый текст остаётся в поиске, а список получает
+  // больше места.
   func textFieldShouldReturn(_ textField: UITextField) -> Bool {
     textField.resignFirstResponder()
     return true
   }
 
+  // Задаёт широкой кнопке подпись, значок и отступы. Архив и выход получают одинаковый порядок
+  // элементов и область нажатия.
   private func configureTile(_ button: UIButton, title: String, icon: String) {
     var config = UIButton.Configuration.plain()
     config.title = title
@@ -319,16 +342,21 @@ final class StudioHistoryController: UIViewController, UITableViewDataSource, UI
     button.contentHorizontalAlignment = .leading
   }
 
+  // Меняет подпись и значок в зависимости от того, открыт архив или общий список. Кнопка
+  // сообщает, куда приведёт следующее нажатие.
   private func updateArchive() {
     configureTile(
       archive, title: archived ? "Все чаты" : "Архив",
       icon: archived ? "KandinskyDrawerBack" : "KandinskyDrawerArchive")
   }
 
+  // Убирает крайние пробелы, чтобы пустой ввод возвращал недавние чаты.
   private var query: String { (search.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines) }
+  // Местный список используется, только когда закрыт архив и поиск пуст.
   private var showingRecent: Bool { !archived && query.isEmpty }
 
-  /// При смене поиска отменяем прежнюю загрузку, чтобы старые результаты не заменили новые.
+  // Отменяет прежнее чтение, сбрасывает границу и выбирает местный список или первый сетевой
+  // запрос. Запоздалый результат другого поиска не подменит новый.
   private func reload(debounce: Bool = false) {
     loadTask?.cancel()
     loadID += 1
@@ -348,8 +376,8 @@ final class StudioHistoryController: UIViewController, UITableViewDataSource, UI
     loadPage(debounce: debounce)
   }
 
-  /// Читает сохранённый каталог недавних чатов вместо повторного запроса первых страниц при открытии
-  /// панели.
+  // Читает сохранённые карточки и проверяет номер запроса перед показом. Отмечает их как уже
+  // доступные на телефоне и меняет таблицу лишь при другом составе или состоянии.
   private func loadRecent() {
     loadTask?.cancel()
     loadID += 1
@@ -380,6 +408,8 @@ final class StudioHistoryController: UIViewController, UITableViewDataSource, UI
     }
   }
 
+  // Загружает следующую порцию поиска, архива или продолжения списка. Убирает повторные чаты и
+  // применяет ответ только к тому запросу, который ещё отображается.
   private func loadPage(debounce: Bool = false) {
     guard !loading, hasMore || failed else { return }
     if showingRecent && offset == 0 {
@@ -414,6 +444,8 @@ final class StudioHistoryController: UIViewController, UITableViewDataSource, UI
     }
   }
 
+  // Собирает архив, календарные группы или простой список поиска из текущих строк. Затем
+  // обновляет таблицу и нижнюю подсказку в одном порядке.
   private func rebuildSections() {
     if archived {
       sections = [Section(title: "Архив", threads: rows)]
@@ -428,6 +460,8 @@ final class StudioHistoryController: UIViewController, UITableViewDataSource, UI
     updateFooter()
   }
 
+  // Показывает ожидание, повтор, продолжение или причину пустого списка. Действие на нижней
+  // строке включается только тогда, когда можно начать следующий запрос.
   private func updateFooter() {
     let title: String
     if readingRecent {
@@ -454,13 +488,21 @@ final class StudioHistoryController: UIViewController, UITableViewDataSource, UI
     }
   }
 
+  // Возвращает текущее число групп для таблицы. Система не будет запрашивать строки групп,
+  // которых теперь нет.
   func numberOfSections(in tableView: UITableView) -> Int { sections.count }
+  // Возвращает число чатов в заданной группе. При переходе в архив или поиске таблица получает
+  // размер именно нового списка.
   func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
     sections[section].threads.count
   }
+  // Оставляет место под заголовок только у группы с названием. Результаты поиска без заголовка не
+  // получают пустую полосу.
   func tableView(_ tableView: UITableView, heightForHeaderInSection section: Int) -> CGFloat {
     sections[section].title == nil ? 0 : 36
   }
+  // Создаёт видимый заголовок с короткой подписью группы. Для списка без подписи возвращает
+  // отсутствие заголовка.
   func tableView(_ tableView: UITableView, viewForHeaderInSection section: Int) -> UIView? {
     guard let title = sections[section].title else { return nil }
     let frame = UIView()
@@ -474,7 +516,8 @@ final class StudioHistoryController: UIViewController, UITableViewDataSource, UI
     return frame
   }
 
-  /// Строка могла показывать другой чат. Убираем старый обработчик, чтобы нажатие открыло текущий.
+  // Привязывает повторно используемую строку к текущему чату и заменяет прежнее действие
+  // открытия. Иначе нажатие могло бы открыть чат из предыдущего прокрученного ряда.
   func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
     let cell =
       tableView.dequeueReusableCell(withIdentifier: "thread", for: indexPath) as! StudioThreadCell
@@ -486,6 +529,8 @@ final class StudioHistoryController: UIViewController, UITableViewDataSource, UI
     return cell
   }
 
+  // Для уже открытого чата просто закрывает панель. Сохранённый недавний чат открывает сразу, а
+  // найденную на сервере карточку сначала принимает в местное хранилище.
   private func open(_ row: StudioThread) {
     guard !mutating, !leaving else { return }
     if selected == row.id {
@@ -506,6 +551,8 @@ final class StudioHistoryController: UIViewController, UITableViewDataSource, UI
     }
   }
 
+  // Собирает доступные команды для текущего чата. Закрепление предлагается только вне архива, а
+  // подпись действий показывает текущее направление изменения.
   private func menu(_ row: StudioThread) -> UIMenu {
     var actions = [UIAction(title: "Переименовать") { [weak self] _ in self?.rename(row) }]
     if !row.archived {
@@ -525,6 +572,8 @@ final class StudioHistoryController: UIViewController, UITableViewDataSource, UI
     return UIMenu(children: actions)
   }
 
+  // Подставляет нынешнее название и принимает непустой текст в пределах ста символов. Пустое или
+  // случайно длинное название не уйдёт в запрос.
   private func rename(_ row: StudioThread) {
     let alert = UIAlertController(title: "Переименовать чат", message: nil, preferredStyle: .alert)
     alert.addTextField {
@@ -543,6 +592,8 @@ final class StudioHistoryController: UIViewController, UITableViewDataSource, UI
     present(alert, animated: true)
   }
 
+  // Посылает изменение выбранного чата и обновляет список после подтверждения. Пока запрос идёт,
+  // второе изменение не начнётся.
   private func change(_ row: StudioThread, _ value: StudioThreadChange) {
     guard !mutating else { return }
     mutating = true
@@ -555,6 +606,8 @@ final class StudioHistoryController: UIViewController, UITableViewDataSource, UI
     }
   }
 
+  // Показывает пользователю, какие данные удалятся, и ждёт отдельного подтверждения. Одно
+  // случайное нажатие в списке не удалит историю.
   private func confirmDelete(_ row: StudioThread) {
     let alert = UIAlertController(
       title: "Удалить чат?", message: "Запросы и результаты этого чата будут удалены.",
@@ -565,6 +618,8 @@ final class StudioHistoryController: UIViewController, UITableViewDataSource, UI
     present(alert, animated: true)
   }
 
+  // Передаёт удаление по номеру и ждёт ответа. Для выбранного чата закрывает панель и сообщает
+  // владельцу экрана, для другого обновляет список.
   private func delete(_ row: StudioThread) {
     guard !mutating else { return }
     mutating = true
@@ -577,6 +632,8 @@ final class StudioHistoryController: UIViewController, UITableViewDataSource, UI
     }
   }
 
+  // Показывает подсказку о неудачном действии, пока панель ещё видима. Закрытому экрану окно
+  // ошибки больше не нужно.
   private func showError() {
     let alert = UIAlertController(
       title: "Не удалось выполнить действие", message: "Проверьте соединение и повторите.",
@@ -585,6 +642,7 @@ final class StudioHistoryController: UIViewController, UITableViewDataSource, UI
     if view.window != nil { present(alert, animated: true) }
   }
 
-  /// Поздняя работа больше не должна удерживать ненужный запрос панели.
+  // Отменяет незавершённое чтение при освобождении панели. Больше нет экрана, которому можно
+  // передать результат.
   deinit { loadTask?.cancel() }
 }

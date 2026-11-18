@@ -1,7 +1,12 @@
+// Проверяет чтение частей видео, повторное открытие и сборку целого файла на временном диске.
+// Сверяет байты с известным исходником.
+
 import XCTest
 import CryptoKit
 @testable import Kandinsky
 final class MediaRangeCacheTests: XCTestCase {
+  // Читает конец файла, закрывает источник и снова читает тот же конец без сети. Затем получает
+  // остальные части и сравнивает готовый файл. Закрытый источник не должен принять новое чтение.
   func testSeekDiskReuseAndVerifiedPromotion() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
@@ -41,6 +46,8 @@ final class MediaRangeCacheTests: XCTestCase {
     resumed.close()
     XCTAssertThrowsError(try resumed.read(offset: 0, count: 1, cancellation: MediaCancellation()))
   }
+  // Возвращает слишком короткую часть и ждёт отказа. Файл части не должен появиться, иначе
+  // следующее открытие могло бы принять обрыв за готовые данные.
   func testShortRangeIsNotCommitted() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }

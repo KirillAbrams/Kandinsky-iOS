@@ -1,3 +1,6 @@
+// Устанавливаем сохранённую историю и файлы во временное хранилище. Проверки используют один
+// набор из десяти тысяч сообщений и получают одинаковые данные после повторного запуска.
+
 @testable import Kandinsky
 import Foundation
 import CryptoKit
@@ -44,7 +47,11 @@ private struct SeedDocument: Decodable {
 }
 final class SeedInstaller: @unchecked Sendable {
   private let store: SQLiteStore
+  // Получаем хранилище, в которое будут записываться история и признаки готовности. Очередь базы
+  // задаёт порядок этой записи.
   init(store: SQLiteStore) { self.store = store }
+  // Читаем файл порциями по 65 536 байт и считаем контрольную сумму. Это даёт сверку целого файла
+  // без выделения памяти под него целиком.
   private static func sha(_ url: URL) throws -> String {
     let handle = try FileHandle(forReadingFrom: url)
     defer { try? handle.close() }
@@ -52,6 +59,9 @@ final class SeedInstaller: @unchecked Sendable {
     while let data = try handle.read(upToCount: 65536), !data.isEmpty { hasher.update(data: data) }
     return hasher.finalize().map { String(format: "%02x", $0) }.joined()
   }
+  // Сверяем версию, контрольные суммы и число строк. Сначала сохраняем проверенные файлы, затем
+  // одной записью базы добавляем историю и отметку готовности, чтобы повтор после сбоя не создал
+  // дубли.
   func installIfNeeded(
     version: String = "v1", corpusURL: URL,
     onProgress: @escaping @Sendable (Double) -> Void = { _ in }

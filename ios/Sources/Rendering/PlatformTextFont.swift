@@ -1,3 +1,7 @@
+// Здесь выбираются и переиспользуются системные шрифты на айфоне. Для некоторых образов имитатора
+// отдельно сохраняем цветные составные значки, чтобы результат ввода соответствовал реальному
+// телефону.
+
 import CoreText
 import Foundation
 import UIKit
@@ -20,6 +24,8 @@ enum PlatformTextFont {
     c.countLimit = 32
     return c
   }()
+  // Повторно используем сочетание размера и начертания. В имитаторе добавляем рабочий шрифт
+  // цветных значков, сохраняя остальную подстановку системных букв.
   static func uiFont(size: CGFloat, weight: UIFont.Weight = .regular) -> UIFont {
     let key = "\(size):\(weight.rawValue)" as NSString
     if let cached = uiCache.object(forKey: key) { return cached }
@@ -45,7 +51,8 @@ enum PlatformTextFont {
     return base
   }
   #if targetEnvironment(simulator)
-    // В некоторых образах симулятора TextKit заменяет составные эмодзи знаком вопроса.
+    // Проверяем окрестность курсора, когда клавиатура закончила составлять знак. Назначаем шрифт
+    // только целым цветным значкам, не меняя остальные буквы и ещё набираемый текст.
     static func updateEmoji(in editor: UITextView) {
       guard editor.markedTextRange == nil, let descriptor = emojiDescriptor,
         let font = editor.font ?? editor.typingAttributes[.font] as? UIFont
@@ -53,7 +60,7 @@ enum PlatformTextFont {
       let emoji = CTFontCreateWithFontDescriptor(descriptor, font.pointSize, nil) as UIFont
       let value = editor.textStorage.string
       let range = NSRange(location: 0, length: (value as NSString).length)
-      // При редактировании проверяем только соседей курсора. Составной знак может занимать несколько UTF-16 позиций.
+      // Проверяем соседей курсора. Составной знак может занимать несколько позиций в хранилище строки.
       let cursor = min(editor.selectedRange.location, range.length)
       let changed = NSRange(
         location: max(0, cursor - 1), length: min(range.length, cursor + 1) - max(0, cursor - 1))
@@ -71,6 +78,8 @@ enum PlatformTextFont {
       }
     }
   #endif
+  // Готовим строку с нужным шрифтом для измерения. Для имитатора подставляем цветные символы по
+  // целым знакам, а при отмене прекращаем лишний обход и возвращаем короткую заготовку.
   static func attributed(
     _ value: String, font: CTFont, size: CGFloat, isCancelled: @escaping () -> Bool = { false }
   ) -> NSAttributedString {
@@ -101,7 +110,7 @@ enum PlatformTextFont {
         }
       }
     #endif
-    // Отменённая разметка не публикуется. Пустой заменитель экономит оставшуюся работу Core Text.
+    // Отменённая разметка не публикуется. Пустая строка прекращает лишние расчёты текста.
     if isCancelled() { return NSAttributedString(string: " ", attributes: attributes) }
     return text
   }

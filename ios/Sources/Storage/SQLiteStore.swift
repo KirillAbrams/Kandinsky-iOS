@@ -1,14 +1,20 @@
+// Владеет соединением базы и выполняет команды по очереди вне экрана. Здесь открываются таблицы,
+// ограничиваются ожидающие запросы и удаляются старые временные копии.
+
 import Foundation
 import SQLite3
 
 private final class SQLCancellation: @unchecked Sendable {
   private let lock = NSLock()
   private var value = false
+  // Записывает отметку отмены под замком, чтобы очередь могла безопасно прочесть её с другого
+  // потока. Команда, которая ещё ждёт, тогда не начнёт работу.
   func cancel() {
     lock.lock()
     value = true
     lock.unlock()
   }
+  // Читает отметку отмены под тем же замком, чтобы очередь увидела её перед началом работы.
   var cancelled: Bool {
     lock.lock()
     defer { lock.unlock() }
@@ -22,10 +28,15 @@ final class SQLiteStore: @unchecked Sendable {
   private var connection: SQLiteConnection?
   // Одна операция выполняется, ещё шестьдесят четыре могут ждать без остановки экрана
   private let admission = DispatchSemaphore(value: 65)
+  // Запоминает папку и настройки проверочных сбоев. Соединение откроет отдельная очередь, поэтому
+  // создание оболочки не блокирует вызывающий код.
   private init(root: URL, faults: RepositoryFaults) {
     self.root = root
     self.faults = faults
   }
+  // Создаёт папку, убирает временные файлы старых запусков, открывает базу и обновляет её
+  // таблицы. При сбое закрывает соединение и возвращает ошибку вместо частично открытого
+  // хранилища.
   static func open(root: URL, faults: RepositoryFaults = RepositoryFaults()) async throws
     -> SQLiteStore
   {
@@ -60,7 +71,8 @@ final class SQLiteStore: @unchecked Sendable {
       }
     }
   }
-  /// Ограничивает число ожидающих операций, чтобы новые обращения не накапливались без предела.
+  // Пускает работу в ограниченную очередь и перед началом проверяет отмену. Когда работа
+  // закончится или будет пропущена, освобождает место для следующей команды.
   func perform<T>(_ action: @escaping (SQLiteConnection) throws -> T) async throws -> T {
     guard admission.wait(timeout: .now()) == .success else { throw RepoError.io }
     let cancellation = SQLCancellation()
@@ -80,7 +92,8 @@ final class SQLiteStore: @unchecked Sendable {
         }
       }, onCancel: { cancellation.cancel() })
   }
-  /// Ранее принятые действия завершаются перед закрытием, поэтому соединение не исчезает посреди записи.
+  // Ставит закрытие в очередь после принятых команд. Обнуляет соединение после успешного
+  // закрытия, поэтому дальнейшая работа не обратится к уже освобождённой базе.
   func close() async throws {
     try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
       queue.async { [self] in
@@ -96,6 +109,8 @@ final class SQLiteStore: @unchecked Sendable {
       }
     }
   }
+  // Превращает сбои базы и отмену задачи в ошибки, понятные остальному приложению. Например,
+  // заполненное хранилище можно отличить от повреждённого файла.
   static func map(_ error: Error) -> Error {
     if let e = error as? RepoError { return e }
     if error is CancellationError { return RepoError.cancelled }
@@ -109,6 +124,8 @@ final class SQLiteStore: @unchecked Sendable {
     }
     return RepoError.io
   }
+  // Ставит освобождение соединения в очередь, если владелец ушёл без явного закрытия. База не
+  // останется открытой до завершения процесса.
   deinit { if let db = connection { queue.async { sqlite3_close_v2(db.handle) } } }
 }
 
@@ -117,6 +134,8 @@ enum AttachmentScratch {
   private static let run = UUID().uuidString
   private static let folder = "attachment-scratch"
 
+  // Убирает каталоги временных вложений, оставшиеся от прежних запусков. Папку текущего запуска
+  // сохраняет, чтобы не сорвать ещё идущую подготовку.
   static func removePreviousRuns(in root: URL) throws {
     let parent = root.appendingPathComponent(folder, isDirectory: true)
     let files = FileManager.default
@@ -127,6 +146,8 @@ enum AttachmentScratch {
     }
   }
 
+  // Создаёт защищённую папку текущего запуска и выделяет новое имя с нужным расширением. Разные
+  // операции подготовки не перезапишут временную копию друг друга.
   static func file(in root: URL, extension suffix: String) throws -> URL {
     let directory = root.appendingPathComponent(folder).appendingPathComponent(run)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,

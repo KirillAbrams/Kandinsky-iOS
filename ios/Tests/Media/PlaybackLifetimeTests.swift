@@ -1,3 +1,7 @@
+// Проверки времени жизни воспроизведения на айфоне. Они смотрят на реальные кадры, остановку и
+// возврат к сохранённой позиции. Отдельно проверяют, что закрытие, смена файла и уход со строки
+// освобождают проигрыватель.
+
 import XCTest
 import AVFoundation
 import UIKit
@@ -12,6 +16,9 @@ extension MediaCoordinator {
 }
 
 @MainActor final class PlaybackLifetimeTests: XCTestCase {
+  // Показываем четыре результата в одной карточке и ждём, пока каждый проигрыватель продвинется.
+  // После ухода и возврата снова проверяем движение всех четырёх, а при закрытии освобождаем все
+  // места.
   func testFourStudioVideosPlayAndReturnTogether() async throws {
     let harness = try await RepositoryHarness.open()
     let media = MediaStore(store: harness.store, studioOriginals: true)
@@ -65,11 +72,15 @@ extension MediaCoordinator {
       }
     }
     let viewport = CGRect(x: 0, y: 0, width: 390, height: 844)
+    // Меняем видимую область для той же карточки и применяем её к сцене. Так имитируем уход за
+    // экран и возврат без подмены файлов.
     func show(_ area: CGRect) {
       scene.viewport = area
       scene.imageViewport = area
       scene.apply(album)
     }
+    // Ждём четыре готовых проигрывателя и сравниваем их время после короткого промежутка. У
+    // одного признака готовности мог оставаться неподвижный кадр.
     func waitForPlayers(_ node: MessageLayer) async throws {
       let deadline = Date().addingTimeInterval(6)
       var players: [AVPlayer] = []
@@ -98,6 +109,8 @@ extension MediaCoordinator {
     try await harness.close()
   }
 
+  // Сохраняем чёткие кадры на диск и проверяем предел объёма, чужой номер и повреждённые данные.
+  // Сброс и закрытие должны отменить поздний рисунок и вернуть всю занятую память.
   func testDurableVideoCoverIsBoundedAndRejectsWrongKeyCorruptionAndRevocation() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
@@ -112,6 +125,8 @@ extension MediaCoordinator {
     let image = UIGraphicsImageRenderer(size: CGSize(width: 64, height: 64)).image {
       _ in source.draw(in: CGRect(x: 0, y: 0, width: 64, height: 64))
     }.cgImage!
+    // Формируем ключ из номера сообщения и пути файла. Можно проверить неверную принадлежность
+    // кадра, не меняя само содержимое ролика.
     func keyFor(_ id: Int64, _ path: String) -> VideoPlaybackKey {
       VideoPlaybackKey(messageID: id, attachment: Attachment(id: "original", relativePath: path,
         mime: "video/mp4", byteSize: 100, rawWidth: 64, rawHeight: 64, orientation: 1,
@@ -190,6 +205,9 @@ extension MediaCoordinator {
     XCTAssertEqual(budget.bytes, 0, "Closing releases queued and running cover ownership")
   }
 
+  // Открываем ролик, затем шесть других, чтобы прежний проигрыватель ушёл из короткого запаса.
+  // При возврате сравниваем сразу видимый кадр, затем проверяем готовую позицию и продолжение
+  // движения.
   func testFeedReturnAfterSixOtherVideosKeepsSharpOwnCoverWithoutDecoderWait() async throws {
     let (h, media, attachment) = try await make()
     let windowScene = try XCTUnwrap(
@@ -203,6 +221,8 @@ extension MediaCoordinator {
     scene.viewport = CGRect(x: 0, y: 0, width: 390, height: 844)
     scene.imageViewport = scene.viewport
     defer { scene.close(); media.close(); window.isHidden = true; previous?.makeKey() }
+    // Ставим отдельное сообщение целиком или частично в область просмотра и получаем его
+    // беззвучный проигрыватель. Это позволяет отдельно испытать раннюю подготовку у края экрана.
     func show(_ id: Int64, partiallyVisible: Bool = false) throws -> SilentVideoPreview {
       let row = Message(id: id, chatID: 2, order: OrderKey(sortKey: id, messageID: id),
         direction: .incoming, savedAtMs: 0, kind: .video, text: "", caption: "",
@@ -278,6 +298,8 @@ extension MediaCoordinator {
     print("KANDINSKY_VIDEO_DURABLE_BIND_MS=\((ProcessInfo.processInfo.systemUptime - start) * 1000)")
     defer { handoff.close() }
     let frozen = try XCTUnwrap(handoff.image)
+    // Приводим ожидаемый и увиденный кадры к одной небольшой сетке. Средняя разница по точкам
+    // проверяет рисунок, не завися от размера исходника.
     func samples(_ image: CGImage) -> [UInt8] {
       var bytes = [UInt8](repeating: 0, count: 32 * 18 * 4)
       bytes.withUnsafeMutableBytes { storage in
@@ -316,6 +338,9 @@ extension MediaCoordinator {
     try await h.close()
   }
 
+  // Открываем местный ролик вручную и сохраняем рисунок после движения. При повторном запуске
+  // кадр должен оставаться видимым до восстановления позиции, а чтение с диска не выдаётся за
+  // загрузку.
   func testManuallyViewedLocalVideoSavesFrameAndPositionForReopen() async throws {
     let (h, media, staged) = try await make()
     let path = "remote/" + String(repeating: "e", count: 32) + ".mp4"
@@ -384,10 +409,14 @@ extension MediaCoordinator {
     coordinator.close(); media.close(); try await h.close()
   }
 
+  // Сравниваем рисунки одного момента после приведения к общему размеру и сообщаем место
+  // вызывающей проверки. Так отличаем кадр места остановки от первой обложки.
   private func assertDecodedFramesMatch(
     _ expected: CGImage, _ actual: CGImage, savedSeconds: Double, _ message: String,
     file: StaticString = #filePath, line: UInt = #line
   ) {
+    // Получаем небольшую карту цветовых каналов из кадра. Одинаковый способ пересчёта нужен для
+    // сравнения с ожидаемым рисунком.
     func samples(_ image: CGImage) -> [UInt8] {
       var bytes = [UInt8](repeating: 0, count: 32 * 18 * 4)
       bytes.withUnsafeMutableBytes { storage in
@@ -405,6 +434,8 @@ extension MediaCoordinator {
     XCTAssertLessThan(mean, 4, message, file: file, line: line)
   }
 
+  // Даём ролику проиграться и открываем его изображение для просмотра. Проверяем, что переданный
+  // кадр совпадает с позицией просмотра, которую уже успел показать проигрыватель.
   func testViewerHandoffUsesCurrentDecodedVideoFrameInsteadOfUnderlyingPoster() async throws {
     let (h, media, attachment) = try await make()
     let windowScene = try XCTUnwrap(
@@ -418,6 +449,8 @@ extension MediaCoordinator {
     scene.viewport = CGRect(x: 0, y: 0, width: 390, height: 844)
     scene.imageViewport = scene.viewport
     defer { scene.close(); media.close(); window.isHidden = true; previous?.makeKey() }
+    // Вставляем ролик с заданным номером в настоящую видимую сцену. Возвращаем проигрыватель для
+    // проверки кадра, переданного в отдельный просмотр.
     func show(_ id: Int64) throws -> SilentVideoPreview {
       let row = Message(id: id, chatID: 2, order: OrderKey(sortKey: id, messageID: id),
         direction: .incoming, savedAtMs: 0, kind: .video, text: "", caption: "",
@@ -459,6 +492,8 @@ extension MediaCoordinator {
     try await h.close()
   }
 
+  // Первый запрос намеренно завершаем ошибкой. Повторные кадры на месте не начинают цикл
+  // запросов. После ухода и возврата новый владелец может загрузить источник.
   func testFailedPreviewRetriesOnlyAfterLeavingAndReturning() async throws {
     let (h, media, attachment) = try await make()
     let file = try media.fileURL(attachment.relativePath)
@@ -470,6 +505,8 @@ extension MediaCoordinator {
     let pool = SilentVideoPreviewPool(), key = VideoPlaybackKey(messageID: 78004, attachment: attachment)
     pool.beginFrame(visibleKeys: [key], limit: 2)
     let first = try XCTUnwrap(pool.preview(key) { SilentVideoPreview(store: media) })
+    // Привязываем того же владельца к нужному файлу и месту. Повторение этой команды на
+    // неизменной строке проверяет отсутствие лишнего запроса.
     func bind(_ owner: SilentVideoPreview) {
       owner.bind(attachment, frame: CGRect(x: 0, y: 0, width: 300, height: 200), circular: false,
         cornerRadius: 12, bottomSquare: false, playbackKey: key)
@@ -508,9 +545,13 @@ extension MediaCoordinator {
     private let lock = NSLock()
     private var count = 0
     var value: Int { lock.lock(); defer { lock.unlock() }; return count }
+    // Считаем попытку под блокировкой и возвращаем её номер. По номеру пробный источник выбирает
+    // первую ошибку или следующий успешный ответ.
     func increment() -> Int { lock.lock(); defer { lock.unlock() }; count += 1; return count }
   }
 
+  // Заполняем ограниченный запас другими роликами, пока старый проигрыватель не освободится.
+  // Возврат должен показать его сохранённый рисунок и продолжиться с прежнего времени.
   func testEvictedVideoReturnsOnItsOwnRenderedFrameAndSavedPlayhead() async throws {
     let (h, media, attachment) = try await make()
     let windowScene = try XCTUnwrap(
@@ -524,6 +565,8 @@ extension MediaCoordinator {
     scene.viewport = CGRect(x: 0, y: 0, width: 390, height: 844)
     scene.imageViewport = scene.viewport
     defer { scene.close(); media.close(); window.isHidden = true; previous?.makeKey() }
+    // Применяем сообщение с новым номером и возвращаем владельца. Одно и то же видео в разных
+    // сообщениях здесь занимает разные места запаса.
     func show(_ id: Int64) throws -> SilentVideoPreview {
       let row = Message(id: id, chatID: 2, order: OrderKey(sortKey: id, messageID: id),
         direction: .incoming, savedAtMs: 0, kind: .video, text: "", caption: "",
@@ -576,6 +619,8 @@ extension MediaCoordinator {
     try await h.close()
   }
 
+  // Уводим уже идущий ролик из окна и возвращаем. Проверяем прежний проигрыватель, кадр без
+  // размытия, сохранённую паузу и последующее продвижение.
   func testScrollAwayAndBackKeepsNativeVideoFrameItemAndPausedPlayhead() async throws {
     let (h, media, attachment) = try await make()
     let windowScene = try XCTUnwrap(
@@ -601,6 +646,8 @@ extension MediaCoordinator {
       window.isHidden = true
       previous?.makeKey()
     }
+    // Меняем видимую область и применяем прежний снимок сцены. Ролик должен отреагировать на
+    // видимость без замены сообщения.
     func show(_ viewport: CGRect) {
       scene.viewport = viewport
       scene.imageViewport = viewport
@@ -653,6 +700,8 @@ extension MediaCoordinator {
     try await h.close()
   }
 
+  // Проверяем, что поверхность состоит из слоя ролика и одного изображения и не забирает касания.
+  // Так дополнительный вид не закроет видео или жесты ленты.
   func testVideoSurfaceContainsOnlyVideoAndPoster() async throws {
     let h = try await RepositoryHarness.open(),
       media = MediaStore(store: h.store), admission = MediaAdmission()
@@ -671,7 +720,8 @@ extension MediaCoordinator {
     admission.close()
     try await h.close()
   }
-  /// Неподдержанный файл не должен занять разрешение или запустить фоновую загрузку.
+  // Пытаемся открыть неподдержанное звуковое вложение. Проигрыватель должен отказать, не занимая
+  // место и сохраняя выключенный звук.
   func testAudioCannotOpenPlayerOrEnableSound() async throws {
     let h = try await RepositoryHarness.open(),
       media = MediaStore(store: h.store), admission = MediaAdmission()
@@ -691,6 +741,8 @@ extension MediaCoordinator {
     try await h.close()
   }
 
+  // Проверяем, что исходник содержит звук, затем ждём два настоящих повтора без звука и пробуем
+  // перемотать на паузе. При остановке активный файл должен полностью отсоединиться.
   func testMutedRoundLoopsAcrossNativeEndAndKeepsPauseSeekAndOneOwner() async throws {
     let (h, media, a) = try await make(), admission = MediaAdmission(),
       c = MediaCoordinator(admission: admission, media: media)
@@ -762,6 +814,8 @@ extension MediaCoordinator {
     try await h.close()
   }
 
+  // Открываем местное круглое видео в ленте и сравниваем его высоту и положение следующего
+  // сообщения после остановки. В истории не должно остаться пустого зазора.
   func testCachedRoundPlaybackKeepsRowAndFollowingMessageStable() async throws {
     let (h, media, a) = try await make(), admission = MediaAdmission(),
       c = MediaCoordinator(admission: admission, media: media), host = ChatScrollHost()
@@ -795,6 +849,8 @@ extension MediaCoordinator {
     host.layoutIfNeeded()
     try await host.open(chatID: 2, repository: h.repo, anchor: nil)
     host.setMediaVisible(true)
+    // Ищем подготовленную строку нужного круглого видео во вложенных слоях. Замер берёт
+    // координаты именно этой строки.
     func roundLayout(_ layer: CALayer) -> PreparedText? {
       if let node = layer as? MessageLayer, let fragment = node.fragment,
         fragment.id.messageID == round.id
@@ -804,6 +860,8 @@ extension MediaCoordinator {
       for child in layer.sublayers ?? [] { if let result = roundLayout(child) { return result } }
       return nil
     }
+    // Ждём, когда заданное состояние проигрывателя или ленты появится, с предельным сроком.
+    // Дальнейшие сравнения выполняем после применения изменения.
     func settled(_ check: () -> Bool, seconds: Double = 5) async throws -> Bool {
       let end = Date().addingTimeInterval(seconds)
       while Date() < end {
@@ -870,6 +928,8 @@ extension MediaCoordinator {
     try await h.close()
   }
 
+  // Ждём окончания обычного видео и проверяем остановку при сохранённом источнике. Затем
+  // перематываем и убеждаемся, что повтор действительно двигается вперёд.
   func testRegularVideoEndsWithoutLoopingAndCanSeekToReplay() async throws {
     let (h, media, a) = try await make(), admission = MediaAdmission(),
       c = MediaCoordinator(admission: admission, media: media)
@@ -912,6 +972,8 @@ extension MediaCoordinator {
     try await h.close()
   }
 
+  // Запускаем беззвучный предпросмотр и ловим два сброса времени на границе файла. Звуковых
+  // дорожек в источнике показа быть не должно, а снятие владельца гасит прежний вывод.
   func testMutedRoundPreviewCrossesTwoNativeEndsWithoutAudioOrExtraOwners() async throws {
     let (h, media, a) = try await make()
     let scene = try XCTUnwrap(
@@ -956,6 +1018,8 @@ extension MediaCoordinator {
     try await h.close()
   }
 
+  // Занимаем два места предпросмотра, затем меняем источник одного. Старый слой и проигрыватель
+  // этого файла освобождаются, а сосед продолжает работу.
   func testChangingSourceWithBothPreviewSlotsOccupiedRetiresOldNativeOutput() async throws {
     let (h, media, a) = try await make()
     let
@@ -1007,6 +1071,8 @@ extension MediaCoordinator {
     XCTAssertEqual(MediaAdmission.previewOwnerCount, 0)
     try await h.close()
   }
+  // Сто раз готовим первый настоящий кадр и закрываем предпросмотр. Считаем полученные и закрытые
+  // кадры, проверяем отсутствие звука, ограниченный пик владельцев и нулевой расход в конце.
   func testHundredSilentNativePreviewLifecyclesReleaseOwnersAndOutputs() async throws {
     let (h, media, a) = try await make(), admission = MediaAdmission()
     let
@@ -1100,6 +1166,8 @@ extension MediaCoordinator {
     ).write(to: base.appendingPathComponent("kandinsky-preview-hundred.json"), options: .atomic)
     try await h.close()
   }
+  // Показываем обычный и круглый ролики в видимой ленте и проверяем меняющиеся беззвучные кадры.
+  // При переходе к ручному показу прежние владельцы освобождают места.
   func testVisibleRoundAndVideoAutoplayMutedActualFramesAndRetireBeforeManualPlayer() async throws {
     print("SILENT_SETUP before-stage")
     let (h, media, a) = try await make(), admission = MediaAdmission(), host = ChatScrollHost(),
@@ -1141,6 +1209,8 @@ extension MediaCoordinator {
     try await host.open(chatID: 2, repository: h.repo, anchor: nil)
     host.setMediaVisible(true)
     print("SILENT_SETUP history-opened")
+    // Обходим дерево и возвращаем только слои системного проигрывателя. Так измеряем количество
+    // фактических выводов, даже если они вложены в область строки.
     func outputs(_ layer: CALayer) -> [AVPlayerLayer] {
       (layer.sublayers ?? []).flatMap { child in
         (child as? AVPlayerLayer).map { [$0] } ?? outputs(child)
@@ -1193,6 +1263,8 @@ extension MediaCoordinator {
       XCTAssertGreaterThanOrEqual(
         hashes.count, 3, "The visible native output must contain changing decoded frames")
     }
+    // Находим узлы сообщений в дереве, чтобы проверить положение картинки под живым видео. Обход
+    // не считает сам проигрыватель узлом текста.
     func messageNodes(_ layer: CALayer) -> [MessageLayer] {
       (layer.sublayers ?? []).flatMap { child in
         (child as? MessageLayer).map { [$0] } ?? messageNodes(child)
@@ -1247,6 +1319,8 @@ extension MediaCoordinator {
     try await h.close()
   }
 
+  // Открываем временную историю и переносим проверочный файл в обычное хранилище медиа.
+  // Возвращаем все нужные части, чтобы сценарий мог после себя закрыть их.
   private func make(mime: String = "video/mp4") async throws -> (
     RepositoryHarness, MediaStore, Attachment
   ) {
@@ -1270,6 +1344,8 @@ extension MediaCoordinator {
         durationMs: d.durationMs, thumbnailKey: d.thumbnailKey)
     )
   }
+  // Подаём подтверждение с тем же местным файлом, затем редакцию с другим источником. Первый
+  // ответ сохраняет воспроизведение, второй прекращает показ старого файла.
   func testHigherRevisionStopsReplacedSourceButAcknowledgementKeepsTheSameLocalFile() async throws {
     let (h, media, a) = try await make(), admission = MediaAdmission()
     let c = MediaCoordinator(admission: admission, media: media)
@@ -1287,6 +1363,8 @@ extension MediaCoordinator {
     let chat = ChatSummary(
       id: 2, title: "source", lastPreview: "", lastSortKey: 1, lastSavedAtMs: 1, unreadCount: 0,
       pinned: false)
+    // Строим изменение сообщения с переданным вложением. Так в проверке меняется источник, а
+    // номер воспроизведения остаётся узнаваемым.
     func update(_ attachment: Attachment) -> MessageDelta {
       MessageDelta(
         updated: [
@@ -1312,6 +1390,8 @@ extension MediaCoordinator {
     XCTAssertEqual(c.activePlayerCount, 0)
     try await h.close()
   }
+  // Открываем видео, перематываем и меняем активный запрос. Незакрытый проигрыватель не должен
+  // пропустить камеру, а после снятия вывода она получает место.
   func testSingleNativeOwnerSeekSwitchAndCaptureWaitForStop() async throws {
     let (h, media, a) = try await make(), admission = MediaAdmission()
     let coordinator = MediaCoordinator(admission: admission, media: media)
@@ -1361,7 +1441,8 @@ extension MediaCoordinator {
     admission.close()
     try await h.close()
   }
-  /// Следующий захват должен получить своё место после отмены.
+  // Закрываем подготовку после появления системного источника и до готовности. Поздний ответ не
+  // запускает показ. Место освобождается для камеры.
   func testCloseDuringPendingNativePreparationCannotResume() async throws {
     let (h, media, a) = try await make(), admission = MediaAdmission()
     let coordinator = MediaCoordinator(admission: admission, media: media)
@@ -1395,6 +1476,8 @@ extension MediaCoordinator {
     try await h.close()
   }
 
+  // Убираем играющее сообщение из доступной истории. Согласование ленты должно снять его источник
+  // и сократить число владельцев до нуля.
   func testMissingPlaybackMessageStopsNativeOwner() async throws {
     let (h, media, a) = try await make(mime: "video/mp4"), admission = MediaAdmission()
     let c = MediaCoordinator(admission: admission, media: media), host = ChatScrollHost()
@@ -1425,6 +1508,8 @@ extension MediaCoordinator {
     try await h.close()
   }
 
+  // Запускаем уточнение качества у видимого файла. Старый рисунок должен оставаться доступен,
+  // пока новый ещё готовится.
   func testThumbnailQualityUpgradeKeepsDisplayedPreview() async throws {
     let (h, media, a) = try await make()
     defer { media.close() }
@@ -1441,6 +1526,8 @@ extension MediaCoordinator {
     try await h.close()
   }
 
+  // Задерживаем получение оригинала и проверяем, что проигрыватель уже знает номер сообщения. По
+  // этому номеру можно отменить работу до появления кадра.
   func testPendingMediaHasCancellableIdentityBeforeOriginalFinishes() async throws {
     let (h, media, a) = try await make(), admission = MediaAdmission()
     let c = MediaCoordinator(admission: admission, media: media), gate = DispatchSemaphore(value: 0)
@@ -1472,6 +1559,8 @@ extension MediaCoordinator {
     try await h.close()
   }
 
+  // Увеличиваем фото и запрашиваем новую раскладку. Исходный размер остаётся прежним, видимая
+  // рамка увеличена, а края полноэкранного изображения не скругляются.
   func testPhotoZoomRelayoutKeepsBaseGeometry() async throws {
     let (h, media, a) = try await make(mime: "image/jpeg")
     let viewer = PhotoViewerController(attachment: a, media: media)
@@ -1495,6 +1584,8 @@ extension MediaCoordinator {
     media.close()
     try await h.close()
   }
+  // Открываем фото с маленьким кадром и задерживаем чтение оригинала. Проверяем, что отмена
+  // доступна, прекращает сам запрос и оставляет уже показанное изображение.
   func testPhotoViewerCancelsOriginalDownloadAndKeepsPreview() async throws {
     let (h, media, original) = try await make(mime: "image/jpeg")
     defer { media.close() }
@@ -1535,6 +1626,8 @@ extension MediaCoordinator {
     try await h.close()
   }
 
+  // Сто раз готовим, перематываем и останавливаем видео. В каждом цикле активен один
+  // проигрыватель, а после остановки нет источника и удержанной памяти.
   func testHundredPrepareSeekStopCyclesKeepOneNativeOwner() async throws {
     let (h, media, video) = try await make(), admission = MediaAdmission(),
       c = MediaCoordinator(admission: admission, media: media)
@@ -1585,6 +1678,8 @@ extension MediaCoordinator {
     try await h.close()
   }
 
+  // Привязываем фото с подписью и проверяем, что только верхние углы скруглены. Прямой нижний
+  // край должен прилегать к тексту.
   func testCaptionImageUsesCompactContentMergeCorner() async throws {
     let (h, media, a) = try await make(mime: "image/jpeg"), slot = MediaImageSlot(store: media)
     slot.bind(
@@ -1602,6 +1697,8 @@ extension MediaCoordinator {
 }
 
 private extension VideoCoverDiskCache {
+  // Берём сохранённые точки по ключу и создаём удержанную копию для проверки. Пока она жива,
+  // собственную ссылку чтения уже можно отпустить.
   func readFrameForTest(_ key: VideoPlaybackKey, budget: ImageByteBudget) -> PreparedImage? {
     guard let pixels = readPixels(key, budget: budget) else { return nil }
     defer { pixels.closeOwner() }

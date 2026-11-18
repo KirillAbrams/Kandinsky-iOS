@@ -1,10 +1,12 @@
+// Храним отдельный образец подготовки текста для сравнения размеров, картинки, места чтения и
+// времени работы. Образец измеряет строку отдельно или тем же измерителем, который разбивает её
+// на части.
+
 import CoreText
 import UIKit
 
 @testable import Kandinsky
 
-// Независимая разметка для сравнения изображения, геометрии и стоимости подготовки текста.
-// Два способа измерения строки соответствуют исходным образцам проверок.
 final class PreparedTextReference: @unchecked Sendable {
   enum Measurement {
     case separateLine
@@ -33,11 +35,17 @@ final class PreparedTextReference: @unchecked Sendable {
   private var captionStampInline = false
   private let mediaInfo: CTLine
   private let emojiFontSize: CGFloat?
+  // Считаем высоту по нижнему краю последней части. Пустой образец сохраняет минимальную высоту
+  // сообщения.
   var height: CGFloat { blocks.last.map { $0.offsetY + $0.height } ?? 44 }
+  // Выбираем текст сообщения, подпись вложения или запасную метку. Этот же выбор нужен для
+  // сравнения доступных строк.
   var text: String {
     message.kind == .text
       ? message.text : (mediaRect == nil ? Self.label(message) : message.caption)
   }
+  // Готовим ширину, строки, части, подписи и время по прежним правилам оформления. Отдельный
+  // образец нужен, чтобы проверка новой разметки не повторяла её возможную ошибку.
   init(message: Message, key: TextLayoutKey, measurement: Measurement = .separateLine) {
     let emoji = message.kind == .text ? Self.largeEmojiFontSize(message.text) : nil
     emojiFontSize = emoji
@@ -201,6 +209,8 @@ final class PreparedTextReference: @unchecked Sendable {
         $0 + ($1.tinyPreview?.utf8.count ?? 0) * 2 + ($1.waveform?.count ?? 0)
       }
   }
+  // Считаем размер первого вложения по его пропорциям и доступной ширине. Для круглого видео
+  // берём отдельный диаметр, а для остальных учитываем разворот и предельную высоту.
   private static func mediaSize(_ message: Message, bound: CGFloat) -> CGSize? {
     guard let a = message.attachments.first else { return nil }
     if message.kind == .round {
@@ -220,6 +230,8 @@ final class PreparedTextReference: @unchecked Sendable {
     return CGSize(
       width: min(maxW, max(min(170, maxW), rw * scale)), height: min(maxH, max(74, rh * scale)))
   }
+  // Подбираем текстовую метку по виду вложения и добавляем подпись новой строкой. Это запасной
+  // текст образца для сообщения без рисуемой картинки.
   private static func label(_ m: Message) -> String {
     let title: [MessageKind: String] = [
       .photo: "▧ Фотография", .video: "▶ Видео", .voice: "◉ Голосовое сообщение",
@@ -227,6 +239,8 @@ final class PreparedTextReference: @unchecked Sendable {
     ]
     return (title[m.kind] ?? "") + (m.caption.isEmpty ? "" : "\n" + m.caption)
   }
+  // Проверяем, состоит ли текст только из подходящих цветных знаков, и выбираем размер по их
+  // числу. Обычный текст тогда сохраняет исходный шрифт.
   private static func largeEmojiFontSize(_ text: String) -> CGFloat? {
     guard !text.isEmpty else { return nil }
     var count = 0
@@ -255,6 +269,8 @@ final class PreparedTextReference: @unchecked Sendable {
     let multipliers: [CGFloat] = [1, 0.84, 0.69, 0.53, 0.46, 0.38, 0.32, 0.27, 0.24]
     return floor(94 * (length <= multipliers.count ? multipliers[length - 1] : 0.21))
   }
+  // Находим строку, которая пересекает заданную высоту, и возвращаем её первую позицию и остаточный
+  // сдвиг. Так можно сверить точку чтения после переноса строк.
   func lineAnchor(y: CGFloat) -> (Int, CGFloat)? {
     guard let i = tops.indices.first(where: { tops[$0] + lineHeights[$0] > y }) ?? tops.indices.last
     else { return nil }
@@ -265,7 +281,8 @@ final class PreparedTextReference: @unchecked Sendable {
     let text: String
     let frame: CGRect
   }
-  /// Использует сохранённую геометрию образца без повторного измерения текста.
+  // Ищем начало видимого диапазона и берём до заданного числа строк из готовой геометрии.
+  // Измерять весь текст заново для проверки специальных возможностей не нужно.
   func accessibleLines(from lower: CGFloat, to upper: CGFloat, limit: Int) -> [AccessibleLine] {
     guard !tops.isEmpty, limit > 0 else { return [] }
     var lo = 0
@@ -296,6 +313,8 @@ final class PreparedTextReference: @unchecked Sendable {
     }
     return result
   }
+  // Под общей защитой рисуем указанную часть, используя сохранённые строки и границы. Проверка
+  // закрытия и номера части защищает от рисования уже освобождённого блока.
   func draw(part: Int, in context: CGContext) {
     lock.lock()
     defer { lock.unlock() }
@@ -356,15 +375,21 @@ final class PreparedTextReference: @unchecked Sendable {
       context.restoreGState()
     }
   }
+  // Решаем, нужна ли отдельная метка на вложении. У фото с подписью время уже может находиться в
+  // текстовой части.
   var hasMediaStamp: Bool {
     guard mediaRect != nil else { return false }
     return [.video, .gif, .round, .sticker].contains(message.kind) || text.isEmpty
   }
+  // Собираем прямоугольники меток под защитой от закрытия. Они нужны, чтобы сравнить маленькие
+  // нарисованные области с полным образцом.
   var mediaStampRegions: [CGRect] {
     lock.lock()
     defer { lock.unlock() }
     guard !closed, hasMediaStamp, let rect = mediaRect else { return [] }
     var regions: [CGRect] = []
+    // Измеряем строку и добавляем прямоугольник с запасом по ширине. По этому списку проверяем,
+    // какой участок должен занять каждая метка на картинке.
     func pill(_ line: CTLine, x: CGFloat, y: CGFloat) {
       regions.append(
         CGRect(
@@ -392,10 +417,14 @@ final class PreparedTextReference: @unchecked Sendable {
     }
     return regions
   }
+  // Рисуем время, длительность и отметку выключенного звука по виду вложения. Берём сохранённые
+  // данные под той же защитой, что и основной рисунок.
   func drawMediaStamp(in context: CGContext) {
     lock.lock()
     defer { lock.unlock() }
     guard !closed, let rect = mediaRect else { return }
+    // Рисуем тёмную округлую подложку, переворачиваем ось для текста и выводим строку с отступом.
+    // После неё возвращаем настройки рисования для соседних элементов.
     func pill(_ line: CTLine, x: CGFloat, y: CGFloat) {
       let w = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
       let box = CGRect(x: x, y: y, width: w + 10, height: 18)
@@ -450,7 +479,8 @@ final class PreparedTextReference: @unchecked Sendable {
         y: message.kind == .round ? rect.maxY - 22 : rect.maxY - 24)
     }
   }
-  /// Под защитой от одновременного доступа однократно помечает образец закрытым.
+  // Однократно закрываем образец и очищаем подготовленные строки, высоты и части под общей
+  // защитой. Поздний вызов рисования тогда не получит старый рисунок.
   func close() {
     lock.lock()
     defer { lock.unlock() }

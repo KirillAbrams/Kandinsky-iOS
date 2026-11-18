@@ -1,3 +1,6 @@
+// Собирает базу, сетевой обмен и службы вложений для текущего аккаунта айфона. У каждого
+// владельца отдельная папка, чтобы истории не смешивались.
+
 import Foundation
 
 @MainActor final class AccountRuntime {
@@ -7,6 +10,8 @@ import Foundation
   private(set) var media: MediaStore?
   private(set) var playback: MediaCoordinator?
 
+  // Связывает местную запись с очередью текущего владельца и добавляет сигнал обмену о новых
+  // действиях. Без сигнала уже сохранённая команда могла бы ждать следующего повода для передачи.
   private init(store: SQLiteStore, profile: NetworkProfile) {
     self.store = store
     let local = SQLiteChatRepository(store: store, journal: NetworkJournal(userID: profile.userId))
@@ -16,6 +21,8 @@ import Foundation
       local: local, wake: { [weak sync] in Task { @MainActor in sync?.kick() } })
   }
 
+  // Заканчивает ранее начатое удаление и читает сохранённый вход вне потока экрана. При
+  // отсутствии входа может принять приглашение и сохранить результат для следующего запуска.
   static func restoreProfile(root: URL, invitation: String?) async throws -> NetworkProfile? {
     try await Task.detached(priority: .userInitiated) {
       () async throws -> NetworkProfile? in
@@ -36,6 +43,8 @@ import Foundation
     }.value
   }
 
+  // Открывает папку по номеру владельца и устанавливает сетевые таблицы. Если установка не
+  // удалась, закрывает соединение, чтобы приложение не работало с неполной базой.
   static func open(root: URL, profile: NetworkProfile) async throws -> AccountRuntime {
     let name = "net-v1-u" + String(profile.userId)
     let store = try await SQLiteStore.open(root: root.appendingPathComponent(name))
@@ -50,6 +59,9 @@ import Foundation
     }
   }
 
+  // Связывает местные файлы с загрузкой оригиналов и видео, затем проверяет хранилище после
+  // прежних запусков. Создаёт проигрыватель только если за время проверки служба осталась
+  // текущей.
   func prepareMedia(admission: MediaAdmission) async throws {
     let media = MediaStore(store: store, studioOriginals: true)
     self.media = media
@@ -66,6 +78,8 @@ import Foundation
     }
   }
 
+  // Останавливает обмен, проигрывание и работу с файлами, затем убирает ссылки на службы.
+  // Операции прежнего аккаунта не должны использовать ресурсы после выхода.
   func closeServices() {
     network.close()
     playback?.close()

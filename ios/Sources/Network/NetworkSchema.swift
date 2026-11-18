@@ -1,6 +1,12 @@
+// Готовит таблицы связи для чатов, сообщений, файлов и очереди. Местные и серверные номера
+// сохраняются отдельно, чтобы повтор и поздний ответ не возвращали скрытые строки.
+
 import Foundation
 
 enum NetworkSchema {
+  // Создаёт недостающие таблицы одним изменением базы, сверяет известную версию и поправляет
+  // старый порядок отправок. Если версия неизвестна, открытие останавливается до использования
+  // несовместимых таблиц.
   static func install(_ database: SQLiteConnection) throws {
     try database.transaction {
       for statement in statements { try database.execute(statement) }
@@ -12,8 +18,8 @@ enum NetworkSchema {
     }
   }
 
-  /// Переносит их к общей границе ожидающих отправок и повышает версию, чтобы сцена пересчитала
-  /// изменившиеся строки.
+  /// Переносит старые сообщения без номера сервера в конец истории и повышает их версии.
+  /// Обновляет хвосты чатов, чтобы экран показал правильное последнее сообщение.
   private static func repairQueuedOrder(_ database: SQLiteConnection) throws {
     let legacyRows = """
       FROM net_outbox o JOIN net_messages n ON n.localID=o.localID

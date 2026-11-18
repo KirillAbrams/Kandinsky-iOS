@@ -1,9 +1,14 @@
+// Проверки входа в чат и возврата на айфоне. Они отдельно сверяют восстановление всех настроек
+// запроса с фото и загрузку старого черновика без этих настроек.
+
 import UIKit
 import XCTest
 
 @testable import Kandinsky
 
 @MainActor final class NavigationTests: XCTestCase {
+  // Сохраняем черновик с фото и выбранными настройками, закрываем и заново открываем настоящую
+  // базу. Повторный экран должен получить весь прежний выбор.
   func testSavedPhotoDraftRestoresAllGenerationOptionsAfterReopeningSQLite() async throws {
     var h = try await RepositoryHarness.open()
     let media = MediaStore(store: h.store)
@@ -44,6 +49,8 @@ import XCTest
     try await h.close()
   }
 
+  // Передаём черновик между экранами и сверяем полный набор параметров для фото. Восстановление
+  // не должно ограничиться названием модели.
   func testPhotoConversationReturnsEverySelectedOptionWhenNavigating() async throws {
     let h = try await RepositoryHarness.open()
     try await h.store.perform { try NetworkSchema.install($0) }
@@ -70,6 +77,8 @@ import XCTest
     try await h.close()
   }
 
+  // Читаем старый формат без настроек генерации. Текст, номер редакции и вложения сохраняются, а
+  // настройки выбираются прежним запасным способом.
   func testLegacyDraftWithoutGenerationOptionsKeepsTheExistingFallback() throws {
     let data = Data(#"{"text":"Прежний текст","attachmentDrafts":[],"revision":0}"#.utf8)
     let draft = try JSONDecoder().decode(Draft.self, from: data)
@@ -85,6 +94,8 @@ import XCTest
       negative_prompt: "Keep the original scene", guidance_scale: 4)
   }
 
+  // Проверяем открытие известного чата, возврат и запрос неизвестного номера. Несуществующая
+  // история не должна остаться выбранной.
   func testOpenBackAndUnknownChat() {
     let coordinator = AppCoordinator(window: UIWindow())
     coordinator.openChat(id: 2)
@@ -99,6 +110,8 @@ import XCTest
     coordinator.close()
     XCTAssertNil(coordinator.currentChatID)
   }
+  // Повторяем вход и выход для разных чатов. После открытия выбран ровно нужный номер, а возврат
+  // очищает текущий выбор.
   func testRepeatedRoundTripPreservesSelectedIdentity() {
     let coordinator = AppCoordinator(window: UIWindow())
     coordinator.openChat(id: 2)

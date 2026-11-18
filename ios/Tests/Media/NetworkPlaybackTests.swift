@@ -1,9 +1,14 @@
+// Проверки сетевых оригиналов на айфоне. Они сравнивают реальные кадры ролика и повторное чтение
+// уже загруженных частей, а также открытие файла без расширения.
+
 import XCTest
 import AVFoundation
 import CryptoKit
 @testable import Kandinsky
 
 @MainActor final class NetworkPlaybackTests: XCTestCase {
+  // Получаем недавнюю порцию медиа и сохраняем её во временной базе. Используем тот же разбор
+  // ответа, который работает при открытии переписки.
   private func history(_ api: NetworkAPI, _ profile: NetworkProfile, _ h: RepositoryHarness)
     async throws -> [Message]
   {
@@ -16,6 +21,8 @@ import CryptoKit
       return try cache.history(db, chat: chat, data: data).flatMap(\.updated)
     }
   }
+  // Находим сообщение с нужным номером набора и берём следующий результат. Сверяем его вид, иначе
+  // можно случайно прогнать проверку на соседнем файле.
   private func result(_ number: Int, kind: MessageKind, in rows: [Message]) throws -> Message {
     let sorted = rows.sorted { $0.order < $1.order }
     let prompt = try XCTUnwrap(sorted.firstIndex { $0.text == "Медиа \(number)" })
@@ -25,6 +32,9 @@ import CryptoKit
     return result
   }
 
+  // Открываем два настоящих ролика при пустом, частично заполненном и полностью заполненном
+  // хранилище. Следим за изменением кадров и проверяем, что уже записанные части не скачиваются
+  // повторно.
   func testOriginalVideosShowMovingFramesAndReuseRangeCache() async throws {
     let profile = try StudioTestServer.profile(), h = try await RepositoryHarness.open()
     let media = MediaStore(store: h.store)
@@ -53,6 +63,8 @@ import CryptoKit
       previous?.makeKey()
     }
     var positions: [[Int64]] = []
+    // Собираем имена и размеры файлов под каталогом медиа. Снимки до и после помогают проверить,
+    // какие куски уже были на диске.
     func cacheFiles() -> [String: Int] {
       let base = h.root.appendingPathComponent("media"), fm = FileManager.default
       guard
@@ -69,6 +81,8 @@ import CryptoKit
       }
       return result
     }
+    // Подключаем два беззвучных проигрывателя и ждём несколько разных рисунков от каждого.
+    // Закрываем их и убеждаемся, что не занято ни одно место предпросмотра.
     func exercise() async throws -> [Int] {
       let owners = selected.map { _ in SilentVideoPreview(store: media) }
       defer { owners.forEach { $0.close() } }
@@ -169,6 +183,8 @@ import CryptoKit
     XCTAssertEqual(media.bytesUsed, 0)
     try await h.close()
   }
+  // Скачиваем выбранные файлы и сравниваем их контрольные суммы с исходными. Второе открытие
+  // берёт их с диска без новых сетевых запросов.
   func testRealServerCatalogueUsesVerifiedOriginalsAndWarmCacheMakesNoRequests() async throws {
     let profile = try StudioTestServer.profile(), h = try await RepositoryHarness.open()
     let media = MediaStore(store: h.store)
@@ -204,6 +220,8 @@ import CryptoKit
     XCTAssertEqual(media.bytesUsed, 0)
     try await h.close()
   }
+  // Сохраняем настоящий ролик под именем без расширения и передаём системному проигрывателю.
+  // Проверка ждёт готовность, чтобы обнаружить зависимость от имени вместо сведений о файле.
   func testDownloadedMP4WithOpaqueFilenameReachesNativePlayer() async throws {
     let h = try await RepositoryHarness.open()
     let root = h.root.appendingPathComponent("media/remote")
@@ -244,6 +262,8 @@ private final class NetworkRequestTally: @unchecked Sendable {
   private let lock = NSLock()
   private var values: [Double] = []
   private var rangeValues: [[String: Any]] = []
+  // Записываем границы и размер каждого чтения вместе с отменой и временем. Блокировка защищает
+  // журнал, когда отчитываются несколько запросов.
   func range(blob: String, start: Int64, end: Int64, bytes: Int, cancelled: Bool) {
     lock.lock()
     rangeValues.append([
@@ -257,6 +277,8 @@ private final class NetworkRequestTally: @unchecked Sendable {
     defer { lock.unlock() }
     return rangeValues
   }
+  // Запоминаем завершение запроса под той же защитой. Позже по счётчику и времени можно отделить
+  // повторные открытия от первого.
   func increment() {
     lock.lock()
     values.append(ProcessInfo.processInfo.systemUptime)

@@ -1,13 +1,19 @@
+// Фон переписки на айфоне заполняет нужный прямоугольник белым и добавляет слабый узор. Рисунок
+// обрезан по области ленты, чтобы не заходить за панели.
+
 import UIKit
 
 @MainActor enum KandinskyWallpaper {
   private static let pattern = UIImage(named: "KandinskyEvolution")
 
+  // Заполняем область ровным белым цветом. Панели и место под узором сохраняют одинаковый фон.
   static func renderHeader(bounds: CGRect) {
     UIColor.white.setFill()
     UIRectFill(bounds)
   }
 
+  // Проверяем размеры и заполняем область белым. Если узор доступен, увеличиваем его до
+  // заполнения прямоугольника, центрируем и обрезаем края.
   static func render(bounds: CGRect, scale: CGFloat) {
     guard let context = UIGraphicsGetCurrentContext(), bounds.width > 0, bounds.height > 0 else {
       return

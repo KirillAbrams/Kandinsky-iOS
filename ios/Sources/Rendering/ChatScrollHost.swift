@@ -1,10 +1,19 @@
+// Область истории на айфоне владеет сценой, подготовкой строк, показом файлов и состоянием
+// прокрутки. Поступающие изменения сходятся к ближайшему кадру. При уходе закрываем чтение и
+// освобождаем просмотр, чтобы скрытая лента не продолжала работу.
+
 import UIKit
 @MainActor private final class SceneRenderTick: NSObject {
   let action: (CADisplayLink) -> Void
+  // Сохраняем действие, которое нужно вызвать в такт обновлению дисплея. Посредник даёт экрану
+  // передать это действие без сильной ссылки на себя.
   init(action: @escaping (CADisplayLink) -> Void) { self.action = action }
+  // Передаём время кадра назначенному действию. Оно решает, требуется ли перестроить сцену
+  // сейчас.
   @objc func tick(_ link: CADisplayLink) { action(link) }
 }
 @MainActor final class ChatScrollHost: UIScrollView {
+  // При новом указателе сбрасываем готовое окно. Старые строки уже могут стоять на другой высоте.
   var index = HistoryIndex(dayGap: 36) { didSet { preparedRowWindow = nil } }
   let days = ScrollingDays()
   var overlayTop: CGFloat = 0, overlayBottom: CGFloat = 0
@@ -35,6 +44,8 @@ import UIKit
   var pages: PageWindow?
   var repository: ChatRepository?
   var chatID: ChatID?
+  // Подмена сообщений сбрасывает окно готовых строк, чтобы следующая отрисовка взяла свежую
+  // редакцию.
   var loaded: [MessageID: Message] = [:] { didSet { preparedRowWindow = nil } }
   var preparedRowWindow: PreparedChatRowWindow?
   var inFlight: [TextLayoutKey: TextLayoutCancellation] = [:]
@@ -61,9 +72,11 @@ import UIKit
   var initialTimeout: DispatchWorkItem?
   var pendingAnchor: ReadingAnchor?
   var metadataTask: Task<Void, Never>?
+  // Учитываем размер текста из настроек доступности при новом измерении.
   private var desiredFontSize: Int {
     Int(UIFontMetrics.default.scaledValue(for: 18, compatibleWith: traitCollection).rounded())
   }
+  // Используем размер последней раскладки. До первого измерения берём текущее системное значение.
   var fontSize: Int { layoutFontSize > 0 ? layoutFontSize : desiredFontSize }
 
   let playbackOwner = UUID()
@@ -75,9 +88,16 @@ import UIKit
   var onCountChanged: ((Int) -> Void)?
   var onMessageAction: ((Message, MessageAction) -> Void)?
   var onError: ((Error) -> Void)?
+  // Возвращаем число сообщений в указателе, включая ещё не прочитанные порции.
   var messageCount: Int { index.rows.count }
+  // Отдаём последние замеры сцены владельцу истории и проверкам.
   var metrics: SceneMetrics { scene.metrics }
+  // Считаем удерживаемые сообщения в окне. До первого окна используем число уже известных
+  // сообщений.
   var loadedCount: Int { pages?.loadedCount ?? loaded.count }
+  // Настраиваем системную прокрутку, слой истории и жесты. Часы и разрешение собственной инерции
+  // приходят при создании, чтобы проверки могли управлять временем. Предупреждение о памяти
+  // сокращает объём уже подготовленных строк.
   init(
     scrollClock: @escaping () -> TimeInterval = CACurrentMediaTime,
     canUseCompositorInertia: Bool =
@@ -114,12 +134,18 @@ import UIKit
     press.delegate = self
     addGestureRecognizer(press)
   }
+  // Останавливаем связь с дисплеем, снимаем системное наблюдение и закрываем подготовку текста.
+  // Это освобождает обработчики и при уничтожении области.
   deinit {
     renderLink?.invalidate()
     if let memoryObserver { NotificationCenter.default.removeObserver(memoryObserver) }
     worker.close()
   }
+  // Запрещаем восстановление области из файла разметки. Её слой, жесты и часы устанавливаются при
+  // обычном создании из кода.
   required init?(coder: NSCoder) { fatalError() }
+  // Просим новую раскладку при смене системного размера текста. Простая смена других свойств не
+  // требует повторной подготовки строк.
   override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
     super.traitCollectionDidChange(previousTraitCollection)
     if previousTraitCollection?.preferredContentSizeCategory
@@ -128,6 +154,9 @@ import UIKit
       setNeedsLayout()
     }
   }
+  // Снимаем место чтения до смены размеров. Новая ширина или шрифт отменяют подготовку старых
+  // строк и сбрасывают сохранённые кадры сцены. Затем возвращаем позицию и запрашиваем следующий
+  // кадр.
   override func layoutSubviews() {
     let nextFont = desiredFontSize
     let changed = lastSize != bounds.size || layoutFontSize != nextFont
@@ -150,6 +179,8 @@ import UIKit
     layoutPlane()
     schedule()
   }
+  // Объединяем запросы к одному обновлению дисплея и включаем его только при необходимости.
+  // Частота подстраивается под доступную частоту экрана.
   func schedule() {
     guard !queued, !closed else { return }
     queued = true
@@ -164,7 +195,9 @@ import UIKit
     }
     renderLink?.isPaused = false
   }
-  /// Сбрасывает признак ожидания до работы, чтобы новые события могли назначить следующий проход.
+  // Снимаем отметку ожидания до работы и берём видимое положение инерции на время следующего
+  // кадра. Если во время отрисовки ничего не изменилось и инерция закончилась, ставим вызовы
+  // дисплея на паузу.
   private func renderScheduledFrame(_ link: CADisplayLink) {
     guard !closed, queued || compositorFlight != nil else {
       link.isPaused = true
@@ -176,6 +209,8 @@ import UIKit
     // Изменения, поступившие во время согласования, обрабатываются следующим проходом
     if !queued && compositorFlight == nil { link.isPaused = true }
   }
+  // Оцениваем, к какому обновлению можно успеть остановить инерцию на слое. При отсутствии
+  // недавнего замера даём срок по частоте экрана, чтобы не вернуть вид к уже пройденной точке.
   func compositorCatchTime(at now: TimeInterval) -> TimeInterval {
     guard let link = renderLink, link.timestamp > 0 else {
       let rate = window?.screen.maximumFramesPerSecond ?? UIScreen.main.maximumFramesPerSecond
@@ -184,12 +219,16 @@ import UIKit
     let interval = max(1.0 / 120, min(1.0 / 30, link.targetTimestamp - link.timestamp))
     return min(max(now, link.targetTimestamp), now + interval) + interval
   }
-  /// Сами сообщения остаются в истории и могут быть подготовлены снова при необходимости.
+  // Бросаем запас подготовленных строк и уменьшаем допустимую память рисунков. Сообщения остаются
+  // в истории и могут быть заново рассчитаны.
   func trimMemory() {
     preparedRowWindow = nil
     cache.limit = 16 * 1024 * 1024
     cache.trim()
   }
+  // Завершаем ожидание первого кадра, закрываем просмотр и снимаем проигрыватель. Отменяем
+  // запросы, инерцию и подготовку, затем очищаем сцену и элементы доступности. Поздние ответы
+  // больше не должны менять экран.
   func close() {
     mediaExport?.cancel()
     mediaExport = nil

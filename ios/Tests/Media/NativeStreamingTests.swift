@@ -1,3 +1,6 @@
+// Проверки системного проигрывателя и времени жизни источника видео. Сценарии ловят утечку после
+// отмены, потерянное место предпросмотра и ожидание полного файла перед запуском или перемоткой.
+
 import XCTest
 import AVFoundation
 import CryptoKit
@@ -5,6 +8,8 @@ import CryptoKit
 private final class RangeReadCount: @unchecked Sendable {
   private let gate = NSLock()
   private var value = 0
+  // Увеличиваем счётчик под общей блокировкой. Освобождение источника и чтение диапазона могут
+  // прийти из фоновых задач.
   func add() {
     gate.lock()
     value += 1
@@ -17,6 +22,8 @@ private final class RangeReadCount: @unchecked Sendable {
   }
 }
 @MainActor final class NativeStreamingTests: XCTestCase {
+  // Отменяем подготовку беззвучного ролика и ждём ошибку отмены. Источник должен освободиться
+  // ровно один раз даже после дальнейшей уборки.
   func testCancelledSilentPreparationReleasesItsSourceExactlyOnce() async throws {
     let h = try await RepositoryHarness.open()
     let media = MediaStore(store: h.store)
@@ -41,6 +48,8 @@ private final class RangeReadCount: @unchecked Sendable {
     try await h.close()
   }
 
+  // Возвращаем ошибку получения видео и ждём завершения предпросмотра. Не должно остаться ни
+  // проигрывателя в слое, ни занятого места для другого ролика.
   func testFailedSilentPreviewReleasesItsAdmissionSlot() async throws {
     let h = try await RepositoryHarness.open()
     let media = MediaStore(store: h.store)
@@ -70,6 +79,8 @@ private final class RangeReadCount: @unchecked Sendable {
     try await h.close()
   }
 
+  // Даём длинное видео по небольшим участкам и проверяем готовность и перемотку до загрузки всего
+  // файла. В конце закрываем проигрыватель и сверяем, что активных экземпляров больше нет.
   func testAVPlayerPreparesAndSeeksBeforeEntireMP4Arrives() async throws {
     let h = try await RepositoryHarness.open(),
       media = MediaStore(store: h.store), admission = MediaAdmission(),

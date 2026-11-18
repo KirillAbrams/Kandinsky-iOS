@@ -1,7 +1,12 @@
+// Проверяем сохранение места чтения, движения и объектов специальных возможностей при пересчёте
+// размеров и прокрутке истории.
+
 import XCTest
 import UIKit
 @testable import Kandinsky
 @MainActor final class ReflowAnchorTests: XCTestCase {
+  // Проводим соседнее сообщение через край экрана и прокручиваем обратно. Сравниваем тот же
+  // готовый рисунок и проверяем, что слой освобождается после закрытия.
   func testNearbyRowKeepsPreparedBitmapThroughEntryAndReversal() async throws {
     let h = try await RepositoryHarness.open()
     try await h.store.perform { db in
@@ -27,6 +32,8 @@ import UIKit
       window.isHidden = true
       previous?.makeKey()
     }
+    // Обходим дерево слоёв и берём только слои сообщений. Так можно сравнить сохранённый слой со
+    // вновь нарисованным объектом.
     func nodes(_ root: CALayer) -> [MessageLayer] {
       (root.sublayers ?? []).flatMap { child in
         (child as? MessageLayer).map { [$0] } ?? nodes(child)
@@ -90,6 +97,8 @@ import UIKit
       witness, "The native transaction must release the detached layer after the run-loop turn")
     try await h.close()
   }
+  // Многократно запрашиваем раскладку между обновлениями экрана. Подписи и рисунки сохраняются, а
+  // число проходов ограничивается числом измеренных обновлений с небольшим запасом.
   func testRepeatedLayoutInvalidationsShareARefresh() async throws {
     let h = try await RepositoryHarness.open()
     try await h.store.perform { db in
@@ -173,6 +182,9 @@ import UIKit
       passes, ticks.count + 2, "Repeated layout callbacks must share screen refresh work")
     try await h.close()
   }
+  // Готовим очень длинную непросчитанную строку перед видимым сообщением. После уточнения её
+  // высоты проверяем положение видимого рисунка между проходами основного потока, чтобы заметить
+  // даже короткий скачок.
   func testColdPrecedingHeightKeepsPaintedWitnessAtEveryRunLoopBoundary() async throws {
     let h = try await RepositoryHarness.open()
     let long = String(repeating: "مرحبا длинное сообщение 👨‍👩‍👧‍👦 café, перенос строки.\n", count: 1800)
@@ -197,7 +209,8 @@ import UIKit
     parent.view.addSubview(host)
     host.frame = CGRect(x: 0, y: 100, width: 390, height: 600)
     host.layoutIfNeeded()
-    /// Рекурсивно обходит слои, чтобы наблюдать именно действительный нарисованный объект.
+    // Рекурсивно ищем нарисованный первый кусок сообщения с номером два. Проверяем именно его
+    // видимое положение, поскольку расчёт строки сам по себе скачок не покажет.
     func witness(_ root: CALayer) -> MessageLayer? {
       if let value = root as? MessageLayer, value.fragment?.id == FragmentID(messageID: 2, part: 0)
       {
@@ -259,6 +272,9 @@ import UIKit
     host.close()
     try await h.close()
   }
+  // Прокручиваем и проверяем, что система видит тот же объект текста и то же действие
+  // копирования. После обновления строки действие должно взять новое значение из текущего
+  // сообщения.
   func testNativeScrollRetainsAccessibilityObjectsAndActions() async throws {
     let h = try await RepositoryHarness.open()
     try await h.store.perform { db in
@@ -344,7 +360,8 @@ import UIKit
     host.close()
     try await h.close()
   }
-  /// После закрытия должны освободиться и текущие видимые элементы.
+  // Прокручиваем далеко от сохранённого элемента и контролируем размер доступного окна. После
+  // закрытия освобождаются и ушедшие, и ещё видимые элементы.
   func testAccessibilityWindowReleasesDepartedAndClosedElements() async throws {
     let h = try await RepositoryHarness.open()
     try await h.store.perform { db in
@@ -393,6 +410,8 @@ import UIKit
     XCTAssertTrue(textElements(host).isEmpty)
     try await h.close()
   }
+  // Сдвигаем уже видимые фото, звук и круглое видео. Их доступные объекты сохраняются и открывают
+  // вложение с текущей позиции.
   func testRetainedMediaAccessibilityActivatesAtCurrentPositionAndCloses() async throws {
     let h = try await RepositoryHarness.open()
     try await h.store.perform { db in
@@ -431,7 +450,8 @@ import UIKit
       window.isHidden = true
       previous?.makeKey()
     }
-    /// Возвращает действительный объект, чтобы проверить его повторное использование и действие.
+    // Ищем доступный объект вложения по постоянной метке. Это позволяет проверить, сохранился ли
+    // сам объект и с какими координатами он срабатывает после прокрутки.
     func media(_ id: String) -> UIAccessibilityElement? {
       host.subviews.flatMap {
         ($0.accessibilityElements ?? []).compactMap { $0 as? UIAccessibilityElement }
@@ -467,11 +487,15 @@ import UIKit
     try await waitFor { photo == nil && voice == nil && round == nil }
     try await h.close()
   }
+  // Собираем доступные элементы из дочерних окон и оставляем метки сообщений. Кнопки и вложения
+  // иначе исказили бы проверку числа строк.
   private func textElements(_ host: ChatScrollHost) -> [UIAccessibilityElement] {
     host.subviews.flatMap {
       ($0.accessibilityElements ?? []).compactMap { $0 as? UIAccessibilityElement }
     }.filter { ($0.accessibilityIdentifier ?? "").hasPrefix("message.") }
   }
+  // Открываем длинное сообщение на заданном сдвиге ещё до подготовки его строк. Когда появляется
+  // точная высота, положение на экране должно сохраниться.
   func testColdLongMessageHeightKeepsNativePixelPosition() async throws {
     let h = try await RepositoryHarness.open()
     let text = String(
@@ -529,6 +553,8 @@ import UIKit
     host.close()
     try await h.close()
   }
+  // Запускаем три одинаковые системные прокрутки и по-разному меняем их координаты. Проверяем,
+  // что прямой сдвиг границ сохраняет движение, а явная остановка обрывает его.
   func testUIKitGeometryShiftComparedWithExplicitStop() async throws {
     let scene = try XCTUnwrap(
       UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
@@ -565,7 +591,8 @@ import UIKit
       "Telegram-style coordinate shift must preserve stock UIKit motion before being used in the renderer"
     )
   }
-  /// Асинхронная раскладка не должна останавливать прокрутку на первом новом сообщении.
+  // Прокручиваем историю как обычный системный список и ждём подготовки новых строк. Сверяем
+  // пройденное расстояние и видимые пиксели, чтобы заметить остановку на первом новом сообщении.
   func testAsyncRowLayoutDoesNotCancelNativeScrollMotion() async throws {
     let h = try await RepositoryHarness.open()
     try await h.store.perform { db in
@@ -677,6 +704,8 @@ import UIKit
     host.close()
     try await h.close()
   }
+  // Сдвигаем системную прокрутку и проверяем тот же слой и его рисунок. На экране слой должен
+  // уехать вместе с содержимым, сохранив координаты внутри истории.
   func testNativeScrollDoesNotRepositionRetainedContentLayers() async throws {
     let h = try await RepositoryHarness.open()
     let delta = try await h.repo.send(
@@ -704,6 +733,8 @@ import UIKit
     try await waitFor { host.metrics.recordings >= 3 }
     host.setContentOffset(CGPoint(x: 0, y: 100), animated: false)
     try await Task.sleep(nanoseconds: 100_000_000)
+    // Ищем слои сообщений по всему дереву, включая вложенные поверхности. Так сравниваем сам
+    // объект до и после системной прокрутки.
     func nodes(_ root: CALayer) -> [MessageLayer] {
       (root.sublayers ?? []).flatMap { child in
         (child as? MessageLayer).map { [$0] } ?? nodes(child)
@@ -733,10 +764,14 @@ import UIKit
     host.close()
     try await h.close()
   }
+  // Ставим в очередь две долгие разметки, отменяем их и готовим короткую видимую строку.
+  // Отменённые запросы не должны опубликовать неполный рисунок и задержать эту строку.
   func testCancelledOffscreenLayoutsYieldToTheNewViewport() async throws {
     let worker = TextLayoutWorker()
     defer { worker.close() }
     let text = String(repeating: "مرحبا сообщение 👨‍👩‍👧‍👦 café ", count: 1500)
+    // Создаём строку с нужным номером и длиной текста. Длинный и короткий варианты дают
+    // управляемую нагрузку на очередь.
     func row(_ id: Int64, _ value: String) -> Message {
       Message(
         id: id, chatID: 4, order: OrderKey(sortKey: id, messageID: id), direction: .incoming,
@@ -772,6 +807,8 @@ import UIKit
     }
     await fulfillment(of: [ready, cancelled], timeout: 0.25)
   }
+  // Проверяем условие через короткие паузы до шести секунд. Отсутствие готового рисунка
+  // становится ошибкой проверки вместо бесконечного ожидания.
   private func waitFor(_ condition: () -> Bool) async throws {
     let end = Date().addingTimeInterval(6)
     while Date() < end {
@@ -780,6 +817,8 @@ import UIKit
     }
     XCTAssertTrue(condition())
   }
+  // Открываем длинный текст с составными знаками и меняем ширину либо размер шрифта. Номер
+  // сообщения и положение внутри текста должны совпасть после нового переноса.
   private func check(font: Bool) async throws {
     let h = try await RepositoryHarness.open()
     let value = String(repeating: "مرحبا 👨‍👩‍👧‍👦 café é Unicode line ", count: 600)
@@ -834,7 +873,11 @@ import UIKit
     host.close()
     try await h.close()
   }
+  // Запускаем проверку точки чтения с изменённой шириной. Перенос на другие строки не должен
+  // сдвинуть читателя к другому месту текста.
   func testWidthReflowKeepsLogicalUnicodePosition() async throws { try await check(font: false) }
+  // Меняем размер шрифта и проверяем, что строки действительно переразложились. При этом
+  // сохраняется прежнее положение внутри сообщения.
   func testLargeFontActuallyRelayoutsAndKeepsLogicalUnicodePosition() async throws {
     try await check(font: true)
   }

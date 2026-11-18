@@ -1,3 +1,6 @@
+// Отправляет сохранённые команды по одной порции и ждёт подтверждения. При обрыве база сохраняет
+// команды, чтобы следующий канал мог повторить их с теми же номерами.
+
 import Foundation
 
 struct OutboxState {
@@ -9,12 +12,17 @@ struct OutboxState {
 }
 
 extension NetworkSync {
+  // Отмечает необходимость отправки после запуска связи и просит подтвердить сохранённую границу.
+  // Если очередь уже занята, новый проход начнётся после завершения текущего.
   func kick() {
     guard resumed, active else { return }
     outbox.outboxNeedsFlush = true
     acknowledgeSavedCursor()
     sendNextBatch()
   }
+  // Читает ограниченную порцию команд и готовит либо одно удаление, либо сообщения. Удерживает
+  // номер незавершённого запроса, различает окончательный отказ и обрыв и не отправляет
+  // подготовленные данные в сменившийся канал.
   private func sendNextBatch() {
     guard outbox.outboxTask == nil, outbox.pendingRequestID == nil, resumed else { return }
     let connectionID = connectionEpoch
@@ -93,7 +101,8 @@ extension NetworkSync {
     }
   }
 
-  // Только текущая отправка может разорвать соединение по тайм-ауту.
+  // Назначает предел ожидания только для текущего запроса. Если ответ уже пришёл или начался
+  // другой запрос, старый таймер не разрывает соединение.
   private func timeout(_ request: String, _ connectionID: Int) {
     outbox.acknowledgmentTimeout?.cancel()
     outbox.acknowledgmentTimeout = Task { [weak self] in
@@ -103,6 +112,8 @@ extension NetworkSync {
     }
   }
 
+  // Сначала сохраняет принятие в базе, потом освобождает порцию при совпадении номера и обновляет
+  // экран. Следующий проход не начинается до записи прежнего подтверждения.
   func confirmOutgoingMessages(_ data: Data, value: WireObject) async throws {
     let deltas = try await store.perform { [cache] in try cache.accepted($0, data: data) }
     if value.optionalString("requestId") == outbox.pendingRequestID {
@@ -114,6 +125,8 @@ extension NetworkSync {
     kick()
   }
 
+  // Убирает из базы команду с подтверждённым номером и освобождает ожидание только при
+  // совпадении. Запоздалый ответ не должен снять ожидание другой команды.
   func confirmDeletion(_ value: WireObject) async throws {
     let id = try value.string("requestId")
     _ = try await store.perform { db in
@@ -126,6 +139,8 @@ extension NetworkSync {
     kick()
   }
 
+  // Сохраняет причину отказа у ожидающих операций, показывает изменения и освобождает отправку.
+  // Остальные команды могут продолжиться, а отклонённые сообщения не будут выглядеть принятыми.
   func rejectOutgoingMessages(code: String) async throws {
     let ids = outbox.pendingOperationIDs
     let deltas = try await store.perform { [cache] in try cache.failed($0, ids: ids, code: code)
@@ -137,6 +152,8 @@ extension NetworkSync {
     Task { [weak self] in self?.kick() }
   }
 
+  // Отменяет подготовку и ожидание ответа и сбрасывает временные номера. Сохранённые команды
+  // остаются в базе, поэтому разрыв не стирает очередь.
   func resetOutbox() {
     outbox.outboxNeedsFlush = false
     outbox.outboxTask?.cancel()

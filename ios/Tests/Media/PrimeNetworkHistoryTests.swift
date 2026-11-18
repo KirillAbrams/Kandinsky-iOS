@@ -1,7 +1,14 @@
+// Проверка сохранения плотной медиаленты порциями. Она сверяет сообщения и вложения по всей
+// истории, чтобы граница страницы не потеряла или не повторила готовый результат.
+
 import XCTest
 @testable import Kandinsky
 
 @MainActor final class PrimeNetworkHistoryTests: XCTestCase {
+  // Читаем медиаленту назад порциями не больше ста двадцати восьми записей. Проверяем строгие
+  // границы и уникальность номеров, затем сравниваем местное число сообщений с ответами. В
+  // исходной истории должно быть триста восемьдесят четыре сообщения и сто девяносто два фото и
+  // видео.
   func testDenseHistoryStoresTwoMessagesPerResultAcrossPages() async throws {
     let profile = try StudioTestServer.profile()
     let api = NetworkAPI(profile: profile)

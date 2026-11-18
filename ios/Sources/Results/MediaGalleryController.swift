@@ -1,3 +1,8 @@
+// Полноэкранная галерея на айфоне держит открытую страницу и по одной соседней. Она согласует
+// свайпы с подгрузкой истории, переносит поверхность проигрывателя между страницами и оставляет
+// сохранённый кадр до готовности видео. Оригинал фото получает только выбранная страница, чтобы
+// соседние не делили с ней память.
+
 import UIKit
 
 @MainActor final class MediaGalleryController: UIViewController, UIScrollViewDelegate {
@@ -5,6 +10,8 @@ import UIKit
     var entry: MediaGalleryEntry
     var slot = 1
     let photo: PhotoViewerController
+    // Связываем страницу с записью истории и её просмотрщиком. При смене места в окне передвигаем
+    // и используем ту же страницу, пока файл остаётся прежним.
     init(_ entry: MediaGalleryEntry, _ photo: PhotoViewerController) {
       self.entry = entry
       self.photo = photo
@@ -12,6 +19,7 @@ import UIKit
   }
   var onReturn: (() -> Void)?
   var onDeleteResult: ((MessageID, String) -> Void)?
+  // По действию удаления различаем итог генерации и обычное вложение с возвратом в ленту.
   private var studioPlayback: Bool { onDeleteResult != nil }
   private var model: MediaGalleryWindow
   private let repository: ChatRepository, media: MediaStore, playback: MediaCoordinator,
@@ -31,6 +39,7 @@ import UIKit
   private var appeared = false, closing = false, cleaned = false, recentring = false,
     startingVideo = false, controlsHidden = false
   private var returnToChat = true
+  // Пока страница под пальцем или ещё движется к центру, откладываем перестановку соседей.
   private var pageIsMoving: Bool {
     pager.isDragging || pager.isDecelerating
       || pager.bounds.width > 0 && abs(pager.contentOffset.x - pager.bounds.width) > 1
@@ -42,6 +51,8 @@ import UIKit
     return f
   }()
 
+  // Открываем окно на выбранном вложении сообщения и запоминаем переданный из ленты кадр.
+  // Сохраняем владельца проигрывателя, чтобы после закрытия вернуть обычное видео в чат.
   init(
     seed: Message, repository: ChatRepository, media: MediaStore, playback: MediaCoordinator,
     surface: InlinePlayerSurface, preview: PreparedImage?, attachmentIndex: Int = 0
@@ -58,8 +69,13 @@ import UIKit
     modalPresentationStyle = .fullScreen
     modalTransitionStyle = .crossDissolve
   }
+  // Галерее нужны история, хранилище и общее воспроизведение при создании. Файл разметки не
+  // передаёт эти связи.
   required init?(coder: NSCoder) { fatalError() }
+  // Оставляем системные подписи светлыми поверх тёмного фона просмотра.
   override var preferredStatusBarStyle: UIStatusBarStyle { .lightContent }
+  // Создаём полноэкранную область свайпа, дату, подпись и кнопки. Подписываемся на проигрыватель
+  // до первой раскладки, чтобы получить готовый кадр и изменения состояния.
   override func loadView() {
     view = UIView()
     view.backgroundColor = .black
@@ -117,7 +133,8 @@ import UIKit
     reconcile()
     loadNeighbours()
   }
-  /// Для просмотра генераций подписывается на возвращение сцены, чтобы возобновить остановленный показ.
+  // После появления разрешаем выбранной странице загрузку и воспроизведение. Для результата
+  // генерации также слушаем возвращение сцены, чтобы поднять остановленный показ.
   override func viewDidAppear(_ animated: Bool) {
     super.viewDidAppear(animated)
     if !appeared, studioPlayback, let scene = view.window?.windowScene {
@@ -128,6 +145,8 @@ import UIKit
     appeared = true
     activate()
   }
+  // Заново активируем текущий ролик генерации после возврата приложения, если проигрыватель уже
+  // отпустил его. Когда прежний ролик ещё закреплён, второй запуск не нужен.
   @objc private func resumeAutoplay() {
     guard studioPlayback, !closing, activeVideo != nil, playback.currentMessageID == nil else {
       return
@@ -135,6 +154,8 @@ import UIKit
     activeVideo = nil
     activate()
   }
+  // Расставляем страницы и кнопки с учётом системных отступов. При смене ширины сохраняем долю
+  // пройденного свайпа, иначе промежуточная страница прыгнула бы в центр.
   override func viewDidLayoutSubviews() {
     super.viewDidLayoutSubviews()
     let old = pager.bounds.width, fraction = old > 0 ? pager.contentOffset.x / old - 1 : 0
@@ -173,6 +194,8 @@ import UIKit
     CATransaction.commit()
 
   }
+  // Размещаем каждую удерживаемую страницу в её боковом или центральном месте. Если поверхность
+  // видео уже прикреплена к ней, подгоняем размер вместе со страницей.
   private func layoutPages() {
     for page in pages.values {
       page.photo.view.frame = CGRect(
@@ -181,6 +204,9 @@ import UIKit
       if surface.superview === page.photo.view { surface.frame = page.photo.view.bounds }
     }
   }
+  // Обновляем окно вокруг выбранного вложения. Повторно используем страницы того же файла,
+  // закрываем удалённые и сохраняем ручную отмену загрузки при уходе. Только после расстановки
+  // возвращаем страницу в центр и согласуем проигрыватель.
   private func reconcile() {
     guard !closing else { return }
     guard let selected = model.selected else {
@@ -258,6 +284,8 @@ import UIKit
     activate()
     prepareGalleryNeighbours()
   }
+  // Готовим местные кадры на расстоянии двух позиций, чтобы следующий свайп реже показывал грубый
+  // кадр. Отменяем ушедшие задачи, а сеть для такого соседства не открываем.
   private func prepareGalleryNeighbours() {
     guard let index = model.selectedIndex else { return }
     let farther = [index - 2, index + 2].filter { model.entries.indices.contains($0) }
@@ -276,7 +304,9 @@ import UIKit
       }
     }
   }
-  /// По возможности сохраняет текущее обычное воспроизведение чата, иначе начинает выбранный источник.
+  // Снимаем нагрузку с прежнего оригинала до запуска нового. Для фото включаем загрузку на
+  // выбранной странице. Для видео пробуем продолжить отложенное воспроизведение или перенести
+  // прежнюю поверхность из чата, чтобы не терять кадр.
   private func activate() {
     guard appeared, !closing, let selected = model.selected else { return }
     // Прежний оригинал освобождает ресурсы до получения памяти следующей страницей
@@ -328,12 +358,17 @@ import UIKit
     playerChanged()
   }
 
+  // Сверяем владельца проигрывателя, номер сообщения, путь вложения и ошибку. Одного номера
+  // сообщения мало, поскольку в нём может быть несколько файлов.
   private func ownsVideo(_ entry: MediaGalleryEntry) -> Bool {
     playback.presentationOwner == owner && playback.currentMessageID == entry.messageID
       && playback.currentTarget?.attachment.relativePath == entry.attachment.relativePath
       && playback.lastError == nil
   }
 
+  // Ставим соседний ролик на паузу и помечаем сохранённый кадр для показа, если поверхность можно
+  // удержать. Если её освободили, можем подготовить ранее просмотренного соседа из местного файла
+  // с места остановки.
   private func parkVideo(beside selected: MediaGalleryEntry, previousSelection: String?) {
     if let previous = activeVideo {
       if pages[previous.id] != nil, ownsVideo(previous), surface.hasVideoFrame {
@@ -370,6 +405,8 @@ import UIKit
     }
   }
 
+  // Подключаем общую поверхность к нужной странице и записываем её владельца. Пока собственного
+  // кадра нет, позволяет видеть подготовленное изображение страницы.
   private func placeSurface(on page: Page, keepFrame: Bool) {
     playback.presentationOwner = owner
     surface.circular = false
@@ -380,6 +417,8 @@ import UIKit
     surface.setPoster(keepFrame ? nil : page.photo.retainedPreview())
   }
 
+  // Передаём проигрывателю конкретное вложение сообщения. Для подготовки соседа ставим его сразу
+  // на паузу и читаем только местный файл, а выбранный ролик запускаем обычным путём.
   private func startVideo(_ entry: MediaGalleryEntry, preparing: Bool = false) {
     preparingLocalVideo = preparing
     playback.play(
@@ -389,6 +428,8 @@ import UIKit
       startPaused: preparing, localOnly: preparing)
   }
 
+  // Снимаем поверхность и освобождаем принадлежащее галерее воспроизведение, когда оно больше не
+  // нужно. Странице оставляем сохранённый кадр, чтобы при уходе не мелькнула пустота.
   private func retireVideo(stop: Bool = true) {
     let previous = activeVideo ?? parkedVideo
     playingDuringSwipe = false
@@ -401,6 +442,9 @@ import UIKit
     if previous != nil && stop, playback.presentationOwner == owner { playback.stop() }
     if let previous { pages[previous.id]?.photo.showLastVideoFrame() }
   }
+  // Обновляем поверхность после ответа проигрывателя и подставляем сохранённый кадр, пока живой
+  // не готов. Если выбранному ролику не хватило местного файла при подготовке, повторяем запуск
+  // обычным путём. У привычного видео ошибка оставляет кнопку повтора.
   private func playerChanged() {
     guard !closing, let entry = activeVideo ?? parkedVideo else { return }
     surface.update()
@@ -422,15 +466,21 @@ import UIKit
       surface.setPoster(pages[entry.id]?.photo.retainedPreview())
     }
   }
+  // Снимаем отметку отмены выбранного видео, закрываем прежнее воспроизведение и активируем его
+  // снова. Без снятия отметки повтор остался бы заблокирован.
   private func retryVideo() {
     guard let entry = model.selected, entry.isVideo else { return }
     cancelled.remove(entry.id)
     retireVideo()
     activate()
   }
+  // Разрешаем меню удаления только для входящего серверного результата при наличии обработчика.
+  // Исходный пользовательский файл не проходит эту проверку.
   private func canDelete(_ entry: MediaGalleryEntry) -> Bool {
     onDeleteResult != nil && entry.isIncoming && entry.attachment.relativePath.hasPrefix("remote/")
   }
+  // Предлагаем удалить выбранный результат и передаём номер сообщения и ключ конкретного файла
+  // только после нажатия. Остальные вложения того же запроса не становятся целями операции.
   private func confirmResultRemoval() {
     guard let entry = model.selected, canDelete(entry), let remove = onDeleteResult else { return }
     let menu = UIAlertController(
@@ -444,6 +494,8 @@ import UIKit
     menu.popoverPresentationController?.sourceRect = moreButton.bounds
     present(menu, animated: true)
   }
+  // Одним касанием скрываем или возвращаем подпись, кнопки и затемнение. После возврата кнопка
+  // удаления всё равно зависит от текущего вложения.
   private func toggleControls() {
     controlsHidden.toggle()
     moreButton.isHidden = controlsHidden || !(model.selected.map(canDelete) ?? false)
@@ -453,6 +505,8 @@ import UIKit
     topShade.isHidden = controlsHidden
     bottomShade.isHidden = controlsHidden || caption.text.isEmpty
   }
+  // Просим хранилище вернуть ограниченную порцию фото и видео вокруг выбора. Во время жеста
+  // откладываем применение ответа до остановки, иначе страница могла бы сместиться под пальцем.
   private func loadNeighbours() {
     guard !closing, task == nil, model.needsPage, let entry = model.selected,
       lastRequestID != entry.id
@@ -478,6 +532,8 @@ import UIKit
       }
     }
   }
+  // Оставляем смещение в пределах доступных соседей. При живом движении передаём долю свайпа
+  // проигрывателю, не принимая за жест программное центрирование.
   func scrollViewDidScroll(_ scrollView: UIScrollView) {
     guard !recentring, let index = model.selectedIndex, pager.bounds.width > 0 else { return }
     let lower = index > 0 ? 0 : pager.bounds.width,
@@ -492,6 +548,8 @@ import UIKit
       updateVideoDuringSwipe(x / pager.bounds.width - 1)
     }
   }
+  // Возобновляем подготовленный ролик, когда видна большая часть его страницы. Ставим обратно на
+  // паузу при отступлении ниже отдельной границы, чтобы положение у порога не дёргало пуск.
   private func updateVideoDuringSwipe(_ offset: CGFloat) {
     guard let entry = parkedVideo, let slot = pages[entry.id]?.slot, slot != 1,
       ownsVideo(entry), playback.isReady
@@ -505,9 +563,13 @@ import UIKit
       playback.pause()
     }
   }
+  // Закрепляем страницу сразу после отпускания пальца, если движение по инерции не начнётся. При
+  // инерции решение откладывает следующий системный вызов.
   func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
     if !decelerate { settle() }
   }
+  // Если новый жест перехватил незаконченный переход, принимаем ближайшую страницу и переводим её
+  // в центр без видимого сдвига. Полученную историю объединяем уже с этим выбором.
   func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
     guard !closing, !recentring, pager.bounds.width > 0 else { return }
     let offset = pager.contentOffset.x, slot = Int((offset / pager.bounds.width).rounded())
@@ -526,8 +588,14 @@ import UIKit
     recentring = false
     loadNeighbours()
   }
+  // Фиксируем выбранную страницу после инерции. Только теперь разрешаем применить порцию соседей
+  // и пересобрать окно.
   func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) { settle() }
+  // После программного пролистывания применяем то же завершение, что и после жеста. Тогда модель
+  // и показанная страница совпадают.
   func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) { settle() }
+  // Выбираем страницу по конечному смещению, добавляем отложенных соседей и расставляем окно
+  // вокруг нового центра. Затем проверяем, нужно ли ещё читать историю.
   private func settle() {
     guard !closing, !recentring, pager.bounds.width > 0 else { return }
     let slot = Int((pager.contentOffset.x / pager.bounds.width).rounded())
@@ -541,7 +609,9 @@ import UIKit
     reconcile()
     loadNeighbours()
   }
-  /// При неподвижном окне сразу согласует страницы, иначе оставляет обновление до завершения движения.
+  // Отменяем устаревший запрос соседей при обновлении текущего чата и применяем изменения к
+  // модели. Удаление последнего файла закрывает просмотр. При движении перестройка ждёт конца
+  // жеста.
   func apply(_ delta: MessageDelta) {
     guard !closing, delta.chat.id == model.chatID else { return }
     task?.cancel()
@@ -558,6 +628,8 @@ import UIKit
       loadNeighbours()
     }
   }
+  // Отмечаем закрытие до отмены запросов, чтобы поздние ответы не вернули страницы. Если экран
+  // больше не отдаётся в чат, сразу останавливаем видео. Остальные ресурсы снимает общая уборка.
   func close(animated: Bool = true, returnToChat: Bool = true) {
     guard !closing else { return }
     closing = true
@@ -572,6 +644,8 @@ import UIKit
       finishClose()
     }
   }
+  // Запускаем уборку, если окно было закрыто извне или исчезло без штатной кнопки. Отмеченный
+  // процесс закрытия выполняет её своим продолжением.
   override func viewDidDisappear(_ animated: Bool) {
     super.viewDidDisappear(animated)
     if !closing {
@@ -579,6 +653,9 @@ import UIKit
       finishClose()
     }
   }
+  // Один раз снимаем подписки и закрываем страницы. При обычном возврате можем оставить ленте
+  // владельца и позицию видео, а также сохранить готовые кадры на время перехода. При уходе из
+  // чата освобождаем лишние изображения.
   private func finishClose() {
     guard !cleaned else { return }
     cleaned = true

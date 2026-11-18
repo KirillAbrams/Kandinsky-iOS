@@ -1,7 +1,12 @@
+// Проверяем, когда поле ввода разрешает отправку. Нажимаем настоящую кнопку и сверяем, что после
+// записи запроса в чате форма снова пуста.
+
 import XCTest
 import UIKit
 @testable import Kandinsky
 @MainActor final class ComposerAvailabilityTests: XCTestCase {
+  // Передаём полю пробелы, затем текст и нажимаем отправку. Без этой проверки кнопка могла бы
+  // принять пустой запрос или остаться доступной после успешной очистки черновика.
   func testOnlySendableDraftEnablesNativeSendAndSuccessDisablesItAgain() async throws {
     let h = try await RepositoryHarness.open(), model = ConversationState(repository: h.repo)
     let view = ConversationChrome(chatID: 2, state: model, onBack: {})

@@ -1,3 +1,6 @@
+// Сравниваем фон сообщения с прежним способом рисования. Сверяем цвет и прозрачность на разных
+// масштабах и отдельно замеряем затраты на длинных сообщениях.
+
 import XCTest
 import UIKit
 import Darwin
@@ -17,17 +20,22 @@ import Darwin
   }
   private final class Outline: @unchecked Sendable {
     let radius: CGFloat, color: CGColor
+    // Запоминаем радиус углов и цвет для серии сравнений. Повторное рисование с теми же
+    // настройками убирает разницу из-за оформления.
     init(radius: CGFloat, scale: CGFloat, color: CGColor) throws {
       self.radius = radius
       self.color = color
     }
-    /// Смещает полный прямоугольник по вертикали, чтобы получить нужный фрагмент длинного сообщения.
+    // Сдвигаем полную фигуру вверх на высоту уже пройденных частей. Так следующий кусок длинного
+    // сообщения получает нужный фон без лишнего закругления посередине.
     func draw(_ geometry: Geometry, in c: CGContext) {
       MessageBubbleBackground.fill(
         CGRect(x: 0, y: -geometry.offset, width: geometry.width, height: geometry.height),
         radius: radius, color: color, in: c)
     }
   }
+  // Создаём изображение размером с один видимый кусок и рисуем фон одним из двух способов.
+  // Одинаковые размеры и направление осей позволяют сравнить пиксели.
   private nonisolated static func raster(
     _ geometry: Geometry, radius: CGFloat, scale: CGFloat, color: CGColor, outline: Outline?
   ) throws -> CGImage {
@@ -52,6 +60,8 @@ import Darwin
     }
     return try XCTUnwrap(c.makeImage())
   }
+  // Читаем время работы текущего потока в приложении и системе и складываем его в секундах. Паузы
+  // планировщика тогда не выглядят как затраты на рисование.
   private nonisolated static func cpu() throws -> Double {
     var info = thread_basic_info_data_t(),
       count = mach_msg_type_number_t(
@@ -69,6 +79,8 @@ import Darwin
     return Double(info.user_time.seconds) + Double(info.system_time.seconds) + Double(
       info.user_time.microseconds + info.system_time.microseconds) / 1_000_000
   }
+  // Перекладываем изображение в одно и то же цветовое пространство с четырьмя байтами на пиксель.
+  // Сравнение учитывает цвет и прозрачность при одинаковом порядке байтов.
   private nonisolated static func pixels(_ image: CGImage) throws -> [UInt8] {
     let c = try XCTUnwrap(
       CGContext(
@@ -81,6 +93,8 @@ import Darwin
         start: try XCTUnwrap(c.data).assumingMemoryBound(to: UInt8.self),
         count: image.width * image.height * 4))
   }
+  // Рисуем первый блок длинного сообщения новым способом либо только прежний фон. Дробный сдвиг
+  // помогает заметить отличия на границе углов.
   private nonisolated static func plainRaster(
     _ prepared: PreparedText, product: Bool, scale: CGFloat, translation: CGFloat = 0
   ) throws -> CGImage {
@@ -107,6 +121,8 @@ import Darwin
     }
     return try XCTUnwrap(c.makeImage())
   }
+  // Перебираем 54 сочетания размеров, масштабов, поворотов и цветов. Одинаковая картинка и
+  // сохранённая область рисования защищают соседние элементы от случайной обрезки.
   func testBackgroundFallbackAndGraphicsStateMatchOriginalPath() throws {
     let rectangles = [
       CGRect(x: 0, y: 0, width: 280, height: 72),
@@ -122,6 +138,8 @@ import Darwin
             UIColor.white.withAlphaComponent(0.4).cgColor
           ] {
             try autoreleasepool {
+              // Рисуем фон после заданного поворота и масштаба. Затем проверяем, что
+              // преобразование координат и область отсечения остались прежними.
               func draw(_ product: Bool) throws -> CGImage {
                 let c = try XCTUnwrap(
                   CGContext(
@@ -159,6 +177,8 @@ import Darwin
     }
     XCTAssertEqual(comparisons, 54)
   }
+  // Берём длинный текст с пустым первым блоком. Сверяем фон с прежней картинкой и проверяем, что
+  // новый способ тратит на тот же объём работы не более 85 процентов времени потока.
   func testPublicPlainMessageRasterCPUAndPixels() async throws {
     let text = String(repeating: " ", count: 80) + String(repeating: "\n", count: 100)
     let resources = [240, 280].enumerated().map { index, width -> PreparedText in
@@ -198,6 +218,8 @@ import Darwin
     let batches: [[String: Double]] = try await withCheckedThrowingContinuation { reply in
       queue.async {
         do {
+          // По 180 раз рисуем оба подготовленных сообщения выбранным способом. Складываем площадь
+          // картинок, чтобы заметить случай, когда один замер обработал меньше пикселей.
           func batch(_ product: Bool) throws -> [String: Double] {
             let begin = try Self.cpu(), start = ProcessInfo.processInfo.systemUptime
             var digest = 0
@@ -226,6 +248,8 @@ import Darwin
       }
     }
     XCTAssertEqual(Set(batches.compactMap { $0["pixelWork"] }).count, 1)
+    // Сортируем четыре замера и усредняем два средних. Один случайный всплеск нагрузки тогда
+    // меньше влияет на отношение результатов.
     func median(_ values: [Double]) -> Double {
       let v = values.sorted()
       return (v[1] + v[2]) / 2
@@ -253,6 +277,8 @@ import Darwin
       "The public renderer must avoid paying full-surface path-mask cost for a uniform bubble interior"
     )
   }
+  // Режем фон реальных длинных сообщений на куски и сравниваем с полным закруглённым контуром.
+  // Даже при малой разнице цвета прозрачность краёв должна совпасть точно.
   func testBoundedOutlineAgainstOriginalBubblePath() async throws {
     let fixtures = try XCTUnwrap(
       Bundle(for: RepositoryHarness.self).url(forResource: "fixtures", withExtension: nil))
@@ -323,6 +349,8 @@ import Darwin
     let batches: [[String: Double]] = try await withCheckedThrowingContinuation { reply in
       queue.async {
         do {
+          // Рисуем одинаковые фрагменты 30 раз с выбранным способом заполнения. По времени
+          // потока, общему времени и площади можно сопоставить очередные замеры.
           func batch(_ cached: Bool) throws -> [String: Double] {
             let start = ProcessInfo.processInfo.systemUptime, begin = try Self.cpu()
             var digest = 0

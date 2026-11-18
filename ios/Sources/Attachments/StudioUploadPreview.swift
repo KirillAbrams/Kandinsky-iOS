@@ -1,3 +1,6 @@
+// Показывает только что загруженный ролик в нижней панели или на всём экране. Для обоих положений
+// использует одну поверхность и передаёт выбранное действие после закрытия.
+
 import UIKit
 
 @MainActor final class StudioUploadPreview: UIViewController {
@@ -17,6 +20,8 @@ import UIKit
   private var expanded = false
   private var closing = false
 
+  // Принимает готовую поверхность, проигрыватель и свойства файла. Просмотр не должен создавать
+  // второй проигрыватель для того же видео.
   init(
     surface: InlinePlayerSurface, player: MediaCoordinator, attachment: Attachment,
     canEnhance: Bool, onClose: @escaping (Bool) -> Void
@@ -31,10 +36,14 @@ import UIKit
     modalPresentationCapturesStatusBarAppearance = true
   }
 
+  // Запрещает создание из сохранённой разметки, поскольку для просмотра нужна переданная
+  // поверхность и команда завершения.
   required init?(coder: NSCoder) { fatalError("Use programmatic initializer") }
 
   override var preferredStatusBarStyle: UIStatusBarStyle { expanded ? .lightContent : .default }
 
+  // Собирает панель, покрытие, остаток времени и команды разворота и улучшения. Подключает
+  // существующую поверхность, чтобы перейти к показу без второго запуска видео.
   override func loadView() {
     view = UIView()
     view.accessibilityViewIsModal = true
@@ -86,6 +95,8 @@ import UIKit
     setExpanded(false)
   }
 
+  // Рисует кнопку с нужной подписью и размером и связывает её с разворотом или возвратом.
+  // Озвучивание сообщает, что сделает выбранная кнопка.
   private func setup(
     _ button: UIButton, image: String, size: CGFloat, tint: UIColor,
     label: String, id: String, value: Bool
@@ -102,6 +113,8 @@ import UIKit
     view.addSubview(button)
   }
 
+  // Считает оставшееся время по проигрывателю, используя длину вложения как запас. Команда
+  // разворота доступна после готовности кадра без ошибки.
   func update() {
     guard isViewLoaded, !closing, !expanded else { return }
     let duration = player.durationMs > 0 ? player.durationMs : attachment.durationMs ?? 0
@@ -115,6 +128,8 @@ import UIKit
     expand.isEnabled = hitFrame.isUserInteractionEnabled
   }
 
+  // Размещает тот же видеослой в квадрате нижней панели или на всём экране. Кнопки остаются в
+  // доступной области с учётом системной полосы.
   override func viewDidLayoutSubviews() {
     super.viewDidLayoutSubviews()
     let safe = view.safeAreaInsets
@@ -141,6 +156,8 @@ import UIKit
     enhance.frame = CGRect(x: image.minX, y: image.maxY, width: 142, height: 48)
   }
 
+  // Меняет фон, доступные кнопки и рамку той же поверхности. Пока проигрыватель не готов,
+  // бессмысленный переход на пустой экран не происходит.
   private func setExpanded(_ value: Bool) {
     if value && !player.isReady { return }
     expanded = value
@@ -155,14 +172,19 @@ import UIKit
     update()
   }
 
-  /// Итоговое освобождение видеовыхода выполняется после закрытия экрана.
+  // Закрывает нижнюю панель жестом вниз через общий путь. Освобождение поверхности произойдёт
+  // после снятия окна.
   @objc private func swipedDown() { close() }
 
+  // По жесту сначала возвращает из полного экрана, а в панели закрывает просмотр. Пользователь
+  // может пройти те же два шага альтернативным управлением.
   override func accessibilityPerformEscape() -> Bool {
     if expanded { setExpanded(false) } else { close() }
     return true
   }
 
+  // Принимает закрытие только один раз и снимает видеослой после ухода окна. Затем сообщает,
+  // выбрано ли улучшение, чтобы продолжилось только нужное действие.
   func close(animated: Bool = true, enhancing: Bool = false) {
     guard !closing else { return }
     closing = true

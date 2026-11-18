@@ -1,3 +1,7 @@
+// Проверяем полноэкранный просмотр фото и видео на айфоне. Сценарии сверяют кадры при
+// перелистывании, отмену оригинала, повтор источника и возврат одного общего проигрывателя в
+// историю.
+
 import XCTest
 import UIKit
 import AVFoundation
@@ -15,25 +19,35 @@ import UniformTypeIdentifiers
       defer { lock.unlock() }
       return (originals, cancelled)
     }
+    // Увеличиваем число чтений оригинала под блокировкой. Так сравниваем запросы выбранной
+    // страницы с работой соседей.
     func fetch() {
       lock.lock()
       originals += 1
       lock.unlock()
     }
+    // Отмечаем отмену фактической передачи под блокировкой. По этому числу видно, сколько
+    // загрузок завершились при уходе.
     func cancel() {
       lock.lock()
       cancelled += 1
       lock.unlock()
     }
   }
+  // Ждём заданное видимое состояние с ограниченным сроком. Если оно не наступило, выводим
+  // сообщение об ожидаемом этапе.
   private func waitFor(_ message: String, _ condition: () -> Bool) async throws {
     let deadline = Date().addingTimeInterval(5)
     while !condition(), Date() < deadline { try await Task.sleep(nanoseconds: 10_000_000) }
     XCTAssertTrue(condition(), message)
   }
+  // Рекурсивно собираем дочерние виды окна. Так находим кнопку или подпись, даже когда её вложили
+  // в дополнительную панель.
   private func descendants(_ view: UIView) -> [UIView] {
     view.subviews.flatMap { [$0] + descendants($0) }
   }
+  // Убираем оригинал и заново создаём уже просмотренную страницу. Она должна найти чёткую копию
+  // без сети. Очистка удаляет и эту подготовленную копию.
   func testARecreatedGalleryPageFindsItsSharpCopyAfterOriginalEviction() async throws {
     let h = try await RepositoryHarness.open()
     let media = MediaStore(store: h.store)
@@ -79,7 +93,8 @@ import UniformTypeIdentifiers
     try await h.close()
   }
 
-  /// После закрытия должны вернуться все удержания изображений.
+  // Перелистываем большие фото под пределом памяти. На выбранной странице нужен крупный рисунок,
+  // а соседние освобождают исходное разрешение до подготовки следующего.
   func testPagingLargeOriginalsReleasesInactiveResolutionBeforeTheNextDecode() async throws {
     let h = try await RepositoryHarness.open(),
       media = MediaStore(store: h.store), admission = MediaAdmission(),
@@ -142,6 +157,8 @@ import UniformTypeIdentifiers
       descendants(viewer.view).compactMap { $0 as? UIScrollView }.first {
         $0.accessibilityIdentifier == "viewer.pages"
       })
+    // Находим выбранную страницу и читаем ширину её рисунка. По ней различаем крупный кадр и
+    // лёгкое соседнее изображение.
     func widthOfCurrent() -> Int {
       guard
         let page = viewer.children.compactMap({ $0 as? PhotoViewerController }).first(where: {
@@ -189,7 +206,8 @@ import UniformTypeIdentifiers
     try await waitFor("All gallery image leases retire on close") { media.bytesUsed == 0 }
     try await h.close()
   }
-  /// После закрытия общий интерактивный проигрыватель должен освободиться вместо возврата поверх чата.
+  // Проверяем автоматическое видео результата без управления перемоткой. Переключаем вложение и
+  // закрываем просмотр. В чат не должен вернуться ручной проигрыватель или действие удаления.
   func testStudioPreviewCloseDoesNotHandAnInteractivePlayerBackToChat() async throws {
     let h = try await RepositoryHarness.open(),
       media = MediaStore(store: h.store)
@@ -257,6 +275,8 @@ import UniformTypeIdentifiers
     try await h.close()
   }
 
+  // Показываем исходное видео, меняем размеры и сохраняем тот же проигрыватель. Затем проверяем,
+  // что закрытие и улучшение вызывают ровно своё действие.
   func testSourceVideoKeepsItsPlayerAcrossLayoutsAndClosesWithTheChosenAction() async throws {
     let h = try await RepositoryHarness.open()
     let media = MediaStore(store: h.store)
@@ -289,6 +309,8 @@ import UniformTypeIdentifiers
       window.rootViewController = nil
       previous?.makeKey()
     }
+    // Ищем кнопку предпросмотра по постоянному имени среди дочерних элементов. Точное имя
+    // защищает от нажатия похожей соседней кнопки.
     func button(_ identifier: String, in preview: StudioUploadPreview) throws -> UIButton {
       try XCTUnwrap(descendants(preview.view).compactMap { $0 as? UIButton }.first {
         $0.accessibilityIdentifier == identifier
@@ -369,6 +391,8 @@ import UniformTypeIdentifiers
     try await h.close()
   }
 
+  // На первой попытке выдаём ошибку источника и ждём кнопку повтора. На второй даём настоящий
+  // файл и проверяем появление его кадра.
   func testFailedGalleryVideoCanBeRetriedAndPresentsARealFrame() async throws {
     let h = try await RepositoryHarness.open()
     let media = MediaStore(store: h.store)
@@ -430,6 +454,8 @@ import UniformTypeIdentifiers
     try await h.close()
   }
 
+  // Удерживаем подготовку рисунка автоматического видео. Скрытый элемент загрузки не должен быть
+  // доступен для нажатия или озвучивания.
   func testAutoplayPosterDoesNotExposeAnInvisibleDownloadAction() async throws {
     let h = try await RepositoryHarness.open(),
       media = MediaStore(store: h.store, studioOriginals: true)
@@ -449,6 +475,8 @@ import UniformTypeIdentifiers
     try await h.close()
   }
 
+  // Меняем карточку с работы на готовый ответ, задерживая фото. Индикатор остаётся тем же до
+  // видимого кадра, а после снимается.
   func testStudioPhotoKeepsTheSameIndicatorUntilPixelsArePresented() async throws {
     let h = try await RepositoryHarness.open()
     let media = MediaStore(store: h.store, studioOriginals: true)
@@ -469,6 +497,8 @@ import UniformTypeIdentifiers
     let photo = Attachment(
       id: "net-1-result-first", relativePath: "remote/first.jpg", mime: "image/jpeg", byteSize: 100,
       rawWidth: 1024, rawHeight: 1024, orientation: 1, durationMs: nil, thumbnailKey: "first")
+    // Формируем две стадии одной ячейки с тем же ключом. Это позволяет проверить сохранение
+    // индикатора при смене сведений о файле.
     func snapshot(ready: Bool) -> SceneSnapshot {
       let cells = [
         StudioGeneration.Slot(
@@ -517,6 +547,8 @@ import UniformTypeIdentifiers
     XCTAssertTrue(node.progressLayers.isEmpty)
     try await h.close()
   }
+  // Сначала заполняем два обычных места видео, затем берём ещё два для видимого альбома. Лишнее
+  // разрешение сверх предела получает отказ.
   func testVisibleStudioAlbumCanReserveFourVideoPreviews() throws {
     let ordinary = try (0..<2).map { _ in try XCTUnwrap(MediaAdmission.reservePreview(stop: {})) }
     defer { ordinary.forEach { $0.release() } }
@@ -529,6 +561,8 @@ import UniformTypeIdentifiers
     XCTAssertEqual(MediaAdmission.previewOwnerCount, 4)
     XCTAssertNil(MediaAdmission.reservePreview(studioAlbum: true, stop: {}))
   }
+  // Подаём новое измеренное значение и проверяем цель дуги и анимации перехода и пульса. Один
+  // скачок числа не должен заменить плавный показ.
   func testStudioProgressEasesBetweenMeasuredStepsAndPulses() {
     let layer = StudioProgressLayer()
     let frame = CGRect(x: 2, y: 2, width: 140, height: 120)
@@ -543,13 +577,19 @@ import UniformTypeIdentifiers
     }
   }
 
+  // Листаем фото, видео и следующее фото, затем возвращаемся к видео. Проверяем выбранные
+  // подписи, одну галерею, подготовленный проигрыватель и исходное место истории при закрытии.
   func testPhotoVideoPhotoUsesOnePagedPresentationAndOneNativePlayer() async throws {
     final class CacheMiss: MediaFileProvider {
+      // Возвращаем отсутствие готового местного файла для управляемого источника. Галерея не
+      // должна случайно использовать чужую картинку.
       func cached(_ attachment: Attachment, preview: Bool, token: MediaCancellation) throws
         -> (URL, String)?
       {
         nil
       }
+      // Возвращаем недоступность для пробного источника. Настоящие кадры сценарий подаёт своим
+      // явным способом.
       func resolve(_ attachment: Attachment, preview: Bool, token: MediaCancellation) throws
         -> (URL, String)
       {
@@ -632,15 +672,21 @@ import UniformTypeIdentifiers
         ($0.accessibilityIdentifier ?? "").hasPrefix("viewer.page.")
       }.count == 2
     }
+    // Читаем текст только у видимой подписи галереи. Он подтверждает выбранную страницу после
+    // перелистывания.
     func caption() -> String? {
       descendants(viewer.view).compactMap { $0 as? UITextView }.first {
         $0.accessibilityIdentifier == "viewer.caption" && !$0.isHidden
       }?.text
     }
+    // Переводим галерею на следующую позицию и сообщаем о завершении движения. Используем тот же
+    // обработчик, что завершает системный свайп.
     func next() {
       pager.setContentOffset(CGPoint(x: pager.bounds.width * 2, y: 0), animated: false)
       pager.delegate?.scrollViewDidEndDecelerating?(pager)
     }
+    // Переводим галерею на предыдущую позицию и завершаем движение. Проверяем, что возврат идёт
+    // по прежним страницам.
     func back() {
       pager.setContentOffset(.zero, animated: false)
       pager.delegate?.scrollViewDidEndDecelerating?(pager)
@@ -753,7 +799,8 @@ import UniformTypeIdentifiers
     media.close()
     try await h.close()
   }
-  /// После закрытия все запросы и удержания должны завершиться.
+  // Открываем три страницы и удерживаем оригинал выбранной. Соседи остаются с маленькими кадрами,
+  // ручная отмена сохраняется после листания, а закрытие прекращает остальные чтения.
   func testNeighboursKeepPixelsWhileOnlyTheSelectedOriginalLoadsAndCancellationSurvivesPaging()
     async throws
   {

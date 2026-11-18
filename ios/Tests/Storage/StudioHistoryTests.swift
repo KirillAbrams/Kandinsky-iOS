@@ -1,9 +1,14 @@
+// Проверяет деление чатов по дням, порядок закрепления и поведение повторно использованной строки
+// списка.
+
 import UIKit
 import XCTest
 
 @testable import Kandinsky
 
 final class StudioHistoryTests: XCTestCase {
+  // Собирает карточку с заданным временем и признаками закрепления и генерации. Тест меняет
+  // именно эти параметры, не создавая целый чат и его сообщения.
   private func row(_ id: Int64, at time: Int64, pinned: Bool = false, generating: Bool = false)
     -> StudioThread
   {
@@ -12,11 +17,15 @@ final class StudioHistoryTests: XCTestCase {
       unreadCount: 0, pinned: pinned, archived: false, activityAtMs: time, generating: generating)
   }
 
+  // Задаёт даты вокруг перевода часов и проверяет группы по местному календарю и порядок
+  // закреплённых. Так подмена календарного дня сутками фиксированной длины сразу заметна.
   func testCalendarDaysAcrossDaylightSavingAndPinnedActivityOrder() throws {
     var calendar = Calendar(identifier: .gregorian)
     calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "America/New_York"))
     let iso = ISO8601DateFormatter()
     let now = try XCTUnwrap(iso.date(from: "2026-11-02T12:00:00Z"))
+    // Превращает записанную дату в число для карточки. Все строки теста получают время в той же
+    // мере, что и обычные данные приложения.
     func milliseconds(_ date: String) -> Int64 {
       Int64(iso.date(from: date)!.timeIntervalSince1970 * 1000)
     }
@@ -36,6 +45,8 @@ final class StudioHistoryTests: XCTestCase {
     XCTAssertEqual(promoted.first?.threads.first?.id, 1)
   }
 
+  // Проверяет, что индикатор генерации выключается при повторном использовании строки, а название
+  // и кнопка действий не пересекаются. Иначе статус прежнего чата мог бы остаться у нового.
   @MainActor func testBusyCellStopsOnReuseAndKeepsActionsAndTitleApart() throws {
     let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
     let host = UIViewController()

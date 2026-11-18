@@ -1,9 +1,14 @@
+// Сравниваем затраты на подготовку короткого текста с сохранённым вариантом. Замер охватывает
+// разметку обычных сообщений разной ширины и состава.
+
 import XCTest
 import UIKit
 import Darwin
 @testable import Kandinsky
 
 @MainActor final class MetadataPreparationTests: XCTestCase {
+  // Собираем затраты текущего потока в пользовательском и системном режиме. При ошибке чтения
+  // прекращаем замер, чтобы нулевое время не попало в отчёт.
   private nonisolated static func cpu() throws -> Double {
     var info = thread_basic_info_data_t(),
       count = mach_msg_type_number_t(
@@ -19,6 +24,8 @@ import Darwin
     return Double(info.user_time.seconds) + Double(info.system_time.seconds) + Double(
       info.user_time.microseconds + info.system_time.microseconds) / 1_000_000
   }
+  // Берём короткие фразы, переносы, разные письменности и составные знаки. Сверяем результаты
+  // разметки и проверяем, что медианное время нового способа не выше 90 процентов от прежнего.
   func testTypicalTextPreparationCPUAgainstSharedTypesetterReference() async throws {
     let result: Data = try await withCheckedThrowingContinuation { reply in
       DispatchQueue(label: "Kandinsky.test.metadata", qos: .userInitiated).async {
@@ -41,6 +48,8 @@ import Darwin
                 fontSize: [13, 17, 23][i % 3], scale: i % 3 + 1)
             )
           }
+          // Готовим одну и ту же пачку текстов заданное число раз. Складываем размеры, объём
+          // памяти и число блоков, чтобы уловить пропуск работы в одном из способов.
           func batch(_ candidate: Bool, loops: Int) throws -> [String: Double] {
             let begin = try Self.cpu()
             var work = 0.0
@@ -73,6 +82,8 @@ import Darwin
           guard Set(batches.compactMap { $0["observableLayoutWork"] }).count == 1 else {
             throw MediaError.corrupt
           }
+          // Сортируем четыре замера и усредняем два средних. Так единичная пауза не определяет
+          // результат всей проверки.
           func median(_ values: [Double]) -> Double {
             let v = values.sorted()
             return (v[1] + v[2]) / 2

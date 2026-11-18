@@ -1,8 +1,11 @@
+// Открытие истории ждёт, пока подготовлены видимые строки и сцена может их показать. Для фото и
+// видео ждём лишь ограниченное время, иначе один недоступный файл задержал бы весь экран.
+
 import UIKit
 
 extension ChatScrollHost {
-  /// Завершение происходит после проверки текста и сцены, чтобы экран не открывался раньше нужного
-  /// содержимого.
+  // Завершаем прежнее ожидание, сохраняем новый вызов и ставим срок подготовки медиа. Готовый
+  // кадр или истечение срока запускают повторную проверку.
   func prepareInitialFrame() async throws {
     guard !closed else { throw RepoError.cancelled }
     finishInitialFrame(.failure(RepoError.cancelled))
@@ -18,6 +21,8 @@ extension ChatScrollHost {
     }
   }
 
+  // Забираем ожидающий вызов, снимаем срок и отписываемся от готовности сцены. Результат отдаём
+  // один раз, даже если следом придёт ещё один сигнал.
   func finishInitialFrame(_ result: Result<Void, Error>) {
     let continuation = initialFrame
     initialFrame = nil
@@ -27,6 +32,8 @@ extension ChatScrollHost {
     continuation?.resume(with: result)
   }
 
+  // Проверяем, что есть подготовленные ресурсы для видимых строк и сцена содержит их фрагменты.
+  // Для изображений ждём до срока, а текст и раскладка остаются обязательными.
   func publishInitialFrame(_ fragments: [SceneFragment]) {
     guard initialFrame != nil, initialIndexReady else { return }
     let visible = index.visible(

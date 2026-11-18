@@ -1,6 +1,12 @@
+// Лента на айфоне рисует сообщения слоями, поэтому для озвучивания создаём отдельные элементы с
+// рамками и действиями. Сохраняем их между кадрами, пока видны те же строки, чтобы прокрутка не
+// теряла фокус.
+
 import UIKit
 
 extension ChatScrollHost {
+  // Находим прежний элемент по номеру и ключу разметки. Если содержимое изменилось, создаём
+  // новый, а при обычном сдвиге только поправляем рамку.
   func accessibilityElement(
     _ id: String, key: TextLayoutKey?, frame: CGRect, make: () -> UIAccessibilityElement
   ) -> UIAccessibilityElement {
@@ -19,6 +25,8 @@ extension ChatScrollHost {
     return element
   }
 
+  // Снимаем ушедшие элементы и сравниваем порядок оставшихся со старым списком. Передаём системе
+  // список только при изменении его состава или порядка.
   func publishAccessibility(_ elements: [Any]) {
     for id in accessibilityEntries.keys.filter({ !accessibilityUsed.contains($0) }) {
       accessibilityEntries.removeValue(forKey: id)
@@ -29,6 +37,9 @@ extension ChatScrollHost {
     }
   }
 
+  // Добавляем озвучиваемые фото, кнопки генерации и видимые строки текста с собственными рамками.
+  // Для уже играющего файла управление оставляем проигрывателю. Ограничиваем размер списка для
+  // длинных сообщений.
   func appendRowAccessibility(
     _ row: Message, layout resource: PreparedText, x: CGFloat, rowY: CGFloat,
     viewY: CGFloat, elements: inout [Any]

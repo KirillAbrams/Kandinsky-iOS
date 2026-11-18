@@ -1,16 +1,22 @@
+// Передаёт запросы местной базе, подставляет значения и разбирает строки. Здесь же запись
+// подтверждается целиком или откатывается при ошибке.
+
 import Foundation
 import SQLite3
 
 enum SQLValue {
   case null, integer(Int64), real(Double), text(String)
+  // Возвращает целое поле. Для отсутствующего или другого типа даёт ноль.
   var int: Int64 {
     if case let .integer(v) = self { return v }
     return 0
   }
+  // Возвращает текст или пустую строку, если значение другого типа.
   var string: String {
     if case let .text(v) = self { return v }
     return ""
   }
+  // Возвращает целое или отсутствие значения, когда ноль нужно отличить от пустого поля.
   var optionalInt: Int64? {
     if case let .integer(v) = self { return v }
     return nil
@@ -21,7 +27,12 @@ struct SQLiteFailure: Error { let code: Int32 }
 private let sqlTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 final class SQLiteConnection {
   let handle: OpaquePointer
+  // Принимает уже открытое соединение. Владелец соединения закроет его после всех операций,
+  // поэтому этот класс использует один и тот же указатель.
   init(_ handle: OpaquePointer) { self.handle = handle }
+  // Готовит запрос и по очереди передаёт базе значения каждого места подстановки. При сбое
+  // освобождает запрос и сообщает ошибку, иначе база могла бы выполнить действие с неполными
+  // данными.
   private func prepare(_ sql: String, _ values: [SQLValue]) throws -> OpaquePointer {
     var s: OpaquePointer?
     let code = sqlite3_prepare_v2(handle, sql, -1, &s, nil)
@@ -49,6 +60,8 @@ final class SQLiteConnection {
       throw error
     }
   }
+  // Выполняет одно действие и освобождает подготовленный запрос даже при ошибке. Возвращает номер
+  // последней вставленной строки для операций, которым нужно сразу прочитать результат.
   @discardableResult func execute(_ sql: String, _ values: [SQLValue] = []) throws -> Int64 {
     let s = try prepare(sql, values)
     defer { sqlite3_finalize(s) }
@@ -56,6 +69,8 @@ final class SQLiteConnection {
     guard status == SQLITE_DONE || status == SQLITE_ROW else { throw SQLiteFailure(code: status) }
     return sqlite3_last_insert_rowid(handle)
   }
+  // Читает строки по одной, превращает поля базы в значения приложения и останавливается по
+  // просьбе вызывающего кода. Так можно обойти большой набор без хранения всех строк сразу.
   func forEachRow(_ sql: String, _ values: [SQLValue] = [], _ consume: (SQLRow) throws -> Bool)
     throws
   {
@@ -83,8 +98,8 @@ final class SQLiteConnection {
       if try !consume(row) { return }
     }
   }
-  /// Первую строку сохраняет даже при большом размере, чтобы вызывающая функция могла получить хотя бы
-  /// один результат.
+  // Собирает строки до предела по примерному объёму памяти. Первую отдаёт в любом случае, иначе
+  // даже один крупный результат мог бы оставить чтение без продвижения.
   func rows(_ sql: String, _ values: [SQLValue] = [], maxBytes: Int = 8 * 1024 * 1024) throws
     -> [SQLRow]
   {
@@ -98,6 +113,8 @@ final class SQLiteConnection {
     }
     return result
   }
+  // Читает одно целое из первой строки и сразу завершает обход. Пустой результат даёт ноль, что
+  // подходит счётчикам и чтению версии базы.
   func scalar(_ sql: String, _ values: [SQLValue] = []) throws -> Int64 {
     var value: Int64 = 0
     try forEachRow(sql, values) { row in
@@ -106,7 +123,8 @@ final class SQLiteConnection {
     }
     return value
   }
-  /// Вызывающая функция получает свой результат только после подтверждения сохранения.
+  // Начинает запись заранее, возвращает результат после подтверждения и откатывает изменения при
+  // ошибке. Без такой границы в базе могла бы остаться только часть действия.
   func transaction<T>(_ action: () throws -> T) throws -> T {
     try execute("BEGIN IMMEDIATE")
     do {

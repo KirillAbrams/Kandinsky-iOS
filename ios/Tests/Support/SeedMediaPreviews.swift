@@ -1,8 +1,12 @@
+// Добавляем данные уменьшенных изображений и сохранённые сведения старых вложений для местных
+// проверок.
+
 @testable import Kandinsky
 import Foundation
 enum SeedMediaPreviews {
-  /// Записываем отметку готовности вместе с миниатюрами. Если установка прервётся, при запуске попробуем ещё
-  /// раз.
+  // Читаем ограниченный каталог, проверяем байты и записываем миниатюры по пути и номеру файла.
+  // Отметка готовности сохраняется вместе с данными, чтобы при обрыве можно было повторить
+  // установку.
   static func install(_ db: SQLiteConnection, fixtures: URL) throws {
     if !(try db.rows("SELECT 1 FROM metadata WHERE key='media-preview-catalog-v1'")).isEmpty {
       return

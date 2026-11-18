@@ -1,3 +1,6 @@
+// Готовит изображения для близких строк и части ближайшего видео. Готовые большие кадры остаются
+// в хранилище, а уходящие из области запросы отменяются.
+
 import Foundation
 
 /// У соседних сообщений остаётся вытесняемый кэш, а не скрытый владелец полного рисунка.
@@ -12,7 +15,11 @@ import Foundation
     let relativePath: String
     var request: MediaCancellation?, tinyRequest: MediaCancellation?, video: MediaCancellation?, tiny: PreparedImage?
     var closed = false
+    // Запоминает путь файла для одной ожидаемой строки. Он помогает отличить ближайший ролик от
+    // остальных.
     init(_ relativePath: String) { self.relativePath = relativePath }
+    // Отменяет обычную и малую миниатюры и подготовку видео, затем закрывает удерживаемый малый
+    // кадр. Ушедшая строка освобождает свою работу.
     func close() {
       closed = true
       request?.cancel()
@@ -24,10 +31,14 @@ import Foundation
   }
   private var entries: [String: Entry] = [:]
 
+  // Складывает путь, размер и выбор оригинала в ключ. Одна фотография разных размеров не должна
+  // выдавать чужую копию.
   private func identity(_ attachment: Attachment, _ key: ThumbnailKey) -> String {
     attachment.relativePath + "@\(key.maxPixel):\(key.studioOriginal)"
   }
 
+  // Возвращает удержание готовой миниатюры, а при её отсутствии маленький сохранённый кадр. Не
+  // начинает сетевой запрос в момент показа.
   func preview(_ item: Item, store: MediaStore) -> PreparedImage? {
     let attachment = item.attachment
     let key = store.studioPhotoKey(attachment) ?? ThumbnailKey(maxPixel: item.maxPixel)
@@ -35,6 +46,9 @@ import Foundation
     return store.cachedThumbnail(attachment: attachment, key: key) ?? entry.tiny?.retained()
   }
 
+  // Берёт до двенадцати ближайших вложений, убирает старые и не дублирует одинаковые.
+  // Предварительно готовит только ближайшее видео и оставляет большие рисунки в вытесняемом
+  // хранилище.
   func update(_ items: [Item], store: MediaStore) {
     let selected = items.prefix(12).map { item in
       let key = store.studioPhotoKey(item.attachment) ?? ThumbnailKey(maxPixel: item.maxPixel)
@@ -77,6 +91,8 @@ import Foundation
     }
   }
 
+  // Закрывает все записи подготовки и очищает список. После закрытия страницы не остаётся
+  // ожидающих загрузок для соседних строк.
   func clear() {
     entries.values.forEach { $0.close() }
     entries.removeAll()

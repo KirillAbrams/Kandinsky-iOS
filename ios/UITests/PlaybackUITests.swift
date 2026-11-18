@@ -1,6 +1,10 @@
+// Открываем настоящие фото и видео из существующей медиаленты и проверяем управление просмотром.
+
 import XCTest
 
 final class PlaybackUITests: XCTestCase {
+  // Используем уже открытый аккаунт, заходим в «Плотную медиаленту» и находим доступные элементы.
+  // Проверяем переход в просмотр и возврат к видео в ленте.
   func testPhotoAndVideoOpenFromExistingMediaHistory() throws {
     let app = XCUIApplication()
     app.launch()
@@ -13,6 +17,8 @@ final class PlaybackUITests: XCTestCase {
     XCTAssertTrue(history.waitForExistence(timeout: 10))
     history.tap()
 
+    // Ищем кнопку по точной надписи и при необходимости прокручиваем несколько экранов. Подходит
+    // только кнопка, которую действительно можно нажать.
     func visibleButton(_ label: String) throws -> XCUIElement {
       let buttons = app.buttons.matching(NSPredicate(format: "label == %@", label))
       for _ in 0..<8 {

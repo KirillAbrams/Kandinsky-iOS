@@ -1,9 +1,13 @@
+// Записывает команды телефона в местный журнал до отправки. Номер операции остаётся прежним при
+// разрыве, а ограничения очереди помогают сохранить место для других данных приложения.
+
 import Foundation
 
 struct NetworkJournal: LocalChangeJournal {
   let userID: Int64
 
-  // Старые команды мессенджера могут остаться после обновления. Они не должны задерживать запросы генерации.
+  // Возвращает первую ограниченную порцию исправных команд отправки и удаления по порядку. Старые
+  // команды с иным назначением не должны задерживать генерацию после обновления.
   static func readyOperations(_ database: SQLiteConnection) throws -> [SQLRow] {
     try database.rows(
       """
@@ -15,7 +19,8 @@ struct NetworkJournal: LocalChangeJournal {
       maxBytes: 48 * 1024)
   }
 
-  // Записываем сообщение и номер операции до отправки. При потере ответа телефон сможет повторить ту же команду.
+  // Проверяет номер, текст и файлы, резервирует место и сохраняет связь местной строки с командой
+  // отправки. При потере ответа телефон может повторить ту же команду вместо создания новой.
   func appended(_ database: SQLiteConnection, command: SendCommand, localID: MessageID) throws {
     guard let operation = UUID(uuidString: command.operationID), command.text.utf8.count <= 16384,
       command.caption.utf8.count <= 4096, command.attachments.count <= 10,
@@ -41,7 +46,9 @@ struct NetworkJournal: LocalChangeJournal {
       "UPDATE messages SET deliveryState='pending' WHERE id=?", [.integer(localID)])
   }
 
-  // Если сервер окончательно отклонил отправку, у него ещё нет сообщения, которое нужно удалять.
+  // Помечает связанную строку удалённой и ставит команду только для своего сообщения. Если сервер
+  // уже отклонил отправку и не выдал номер, убирает местную команду. На сервере в таком случае
+  // нечего удалять.
   func deleting(_ database: SQLiteConnection, message: Message) throws {
     guard
       let mapping = try database.rows(
@@ -75,7 +82,8 @@ struct NetworkJournal: LocalChangeJournal {
       ])
   }
 
-  // Для чата достаточно последней границы чтения. Новое значение заменяет предыдущую команду в очереди.
+  // Сохраняет самую дальнюю известную границу чтения для чата. Старое событие не может уменьшить
+  // её, иначе телефон снова увидел бы прочитанное как новое.
   func read(_ database: SQLiteConnection, chatID: ChatID) throws {
     guard
       let row = try database.rows(
@@ -91,7 +99,8 @@ struct NetworkJournal: LocalChangeJournal {
       [.integer(through), .integer(chatID)])
   }
 
-  // Учитываем ожидающие отправки и их файлы, чтобы очередь не заняла всё место на телефоне.
+  // Считает занятые записи, байты команд и объём ожидающих файлов перед добавлением. При
+  // превышении прерывает запись, чтобы очередь отправки не заняла всё место на телефоне.
   private func reserve(_ database: SQLiteConnection, bytes: Int, mediaBytes: Int64) throws {
     guard
       let budget = try database.rows(

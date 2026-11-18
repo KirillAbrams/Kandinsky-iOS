@@ -1,9 +1,15 @@
+// Проверяем хранилище фото и видео на айфоне. Сценарии охватывают подготовку и повторное
+// использование рисунков, очередь чтения, ошибки файлов, сохранение черновиков и освобождение
+// памяти при уходе.
+
 import XCTest
 import AVFoundation
 import UIKit
 import ImageIO
 import UniformTypeIdentifiers
 @testable import Kandinsky
+// Создаём однотонный рисунок нужных размеров в памяти. Размер и цвет известны заранее, поэтому
+// легко проверить подготовку и освобождение.
 private func mediaTestImage(_ width: Int, _ height: Int) -> CGImage {
   let c = CGContext(
     data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
@@ -15,7 +21,11 @@ private func mediaTestImage(_ width: Int, _ height: Int) -> CGImage {
 private final class NativeDecodeProbe {
   var image: CGImage?
   private(set) var closeCount = 0
+  // Даём проверочному владельцу маленький рисунок. На нём можно наблюдать закрытие настоящего
+  // изображения без загрузки файла.
   init() { image = mediaTestImage(32, 20) }
+  // Отмечаем первое закрытие и отпускаем изображение. Проверка видит, если готовый результат не
+  // освободился во время отмены.
   func close() {
     if closeCount == 0 {
       closeCount = 1
@@ -24,6 +34,8 @@ private final class NativeDecodeProbe {
   }
 }
 @MainActor final class MediaStoreTests: XCTestCase {
+  // Заполняем память подготовленным размытым кадром и скрываем экран вне перехода. Проверяем, что
+  // исчезла и сама картинка, и учтённая память.
   func testLeavingStudioOutsideNavigationReleasesCachedBlurPixels() async throws {
     let h = try await RepositoryHarness.open()
     let media = MediaStore(store: h.store, studioOriginals: true)
@@ -43,6 +55,8 @@ private final class NativeDecodeProbe {
     media.close(); try await h.close()
   }
 
+  // Меняем ближайший ролик, пока прежние части ещё готовятся. Новый получает чтение, а готовые
+  // рисунки соседей сохраняются в подходящем размере.
   func testVideoPreparationChangesNearestRowWithoutDroppingPreparedPosters() async throws {
     let h = try await RepositoryHarness.open()
     let media = MediaStore(store: h.store, studioOriginals: true)
@@ -99,6 +113,8 @@ private final class NativeDecodeProbe {
     prefetch.clear(); media.close(); try await h.close()
   }
 
+  // Проверяем, какие части длинного ролика запрашиваются заранее. Следующий проигрыватель читает
+  // готовые начало и конец без новых запросов и не требует всего файла.
   func testVideoPreparationWarmsBoundedStartAndTailForTheNextPlayer() async throws {
     let h = try await RepositoryHarness.open()
     let media = MediaStore(store: h.store, studioOriginals: true)
@@ -111,6 +127,8 @@ private final class NativeDecodeProbe {
     let warmed = expectation(description: "beginning and tail are prepared")
     var fetched: [(Int64, Int64)] = []
     let gate = NSLock(), root = h.store.root
+    // Делаем источник из заранее известных байтов, который записывает запрошенные границы. Это
+    // позволяет сверить объём и содержимое подготовленных частей.
     func source() throws -> MediaPlaybackSource {
       let cache = try MediaRangeCache(root: root, blob: blob, length: Int64(data.count),
         original: root.appendingPathComponent("media/" + asset.relativePath)) { start, end, _ in
@@ -140,6 +158,8 @@ private final class NativeDecodeProbe {
     try await h.close()
   }
 
+  // Задерживаем фоновую передачу и просим видимое фото. Оно должно обойти ненужную работу, а
+  // подписчики того же фото получают общий результат.
   func testForegroundPhotoPreemptsOtherPrefetchAndSamePhotoJoinsOneRequest() async throws {
     let h = try await RepositoryHarness.open()
     let media = MediaStore(store: h.store, studioOriginals: true)
@@ -190,6 +210,8 @@ private final class NativeDecodeProbe {
     try await h.close()
   }
 
+  // Запускаем подготовку фото заранее и делаем его видимым до окончания. Оба получателя должны
+  // получить один и тот же рисунок после одного чтения.
   func testVisiblePhotoJoinsPrefetchWithoutAnotherDownloadOrDecode() async throws {
     let h = try await RepositoryHarness.open()
     let media = MediaStore(store: h.store, studioOriginals: true)
@@ -226,6 +248,8 @@ private final class NativeDecodeProbe {
     media.close()
     try await h.close()
   }
+  // Показываем маленький рисунок готового результата, пока оригинал задержан. Признак доставки
+  // снимается только после чёткого кадра.
   func testPreparedStudioBlurDoesNotFinishDeliveryBeforeOriginalPixels() async throws {
     let h = try await RepositoryHarness.open()
     let media = MediaStore(store: h.store, studioOriginals: true)
@@ -264,6 +288,9 @@ private final class NativeDecodeProbe {
     media.close()
     try await h.close()
   }
+  // Заполняем запас маленьких кадров выше предела. Проверяем вытеснение и новый ключ при
+  // изменении байтов, затем оставляем одну видимую копию и подтверждаем её окончательное
+  // освобождение.
   func testStudioTinyCacheHas64EntriesAndReleasesOwnersOnWarningAndClose() async throws {
     let h = try await RepositoryHarness.open()
     let media = MediaStore(store: h.store, studioOriginals: true)
@@ -298,6 +325,8 @@ private final class NativeDecodeProbe {
     XCTAssertNil(media.cachedTinyPreview(try XCTUnwrap(last)))
     try await h.close()
   }
+  // Готовим маленький рисунок, блокируем новое чтение и привязываем строку. Сразу должен
+  // появиться прежний рисунок того же размера.
   func testWarmBlurredPreviewIsPresentDuringFirstBindWithTinyDecoderBlocked() async throws {
     let h = try await RepositoryHarness.open()
     let media = MediaStore(store: h.store, studioOriginals: true)
@@ -347,6 +376,8 @@ private final class NativeDecodeProbe {
     media.close()
     try await h.close()
   }
+  // Сначала готовим три соседних фото, затем показываем альбом из четырёх. Проверяем все чёткие
+  // ячейки, отсутствие кнопок загрузки и предел общей памяти.
   func testVisibleAlbumDoesNotFailBehindPreparedNeighbors() async throws {
     let h = try await RepositoryHarness.open()
     let media = MediaStore(store: h.store, studioOriginals: true)
@@ -385,6 +416,8 @@ private final class NativeDecodeProbe {
       guard !preview else { throw MediaError.unavailable }
       return (root.appendingPathComponent("media/" + attachment.relativePath), "image/png")
     }
+    // Собираем фрагмент на нужной высоте с одним фото или карточкой альбома. Такое разделение
+    // позволяет независимо проверить соседей и видимые результаты.
     func fragment(_ id: Int64, photos: [Attachment], y: CGFloat, album: Bool) -> SceneFragment {
       let generation: StudioGeneration? = album ? StudioGeneration(
         stage: .succeeded, model: "image", aspect: "1:1", startedAtMs: nil, error: nil,
@@ -406,6 +439,8 @@ private final class NativeDecodeProbe {
       neighbors.append(item)
     }
     scene.apply(SceneSnapshot(ticket: scene.ticket, fragments: neighbors))
+    // Сверяем готовность всех трёх соседних рисунков и сразу освобождаем копии проверки. Альбом
+    // должен прийти уже при занятом запасе памяти.
     func neighborsCached() -> Bool {
       attachments.prefix(3).allSatisfy { value in
         guard let key = media.studioPhotoKey(value),
@@ -418,6 +453,8 @@ private final class NativeDecodeProbe {
     XCTAssertTrue(neighborsCached(), "The pressure fixture must first prepare all three neighbors")
     let visible = fragment(10, photos: Array(attachments.suffix(4)), y: 0, album: true)
     scene.apply(SceneSnapshot(ticket: scene.ticket, fragments: neighbors + [visible]))
+    // Запрашиваем отдельный признак готовности каждой ячейки. По общему состоянию строки не видно
+    // отсутствующего файла.
     func ready() -> [Bool] { (0..<4).map { scene.imageReady(10, attachmentIndex: $0) } }
     for _ in 0..<400 where ready().contains(false) { try await Task.sleep(for: .milliseconds(5)) }
     print("KANDINSKY_PREFETCH_PRESSURE ready=\(ready()) bytes=\(media.bytesUsed) peak=\(media.peakBytesUsed)")
@@ -456,6 +493,8 @@ private final class NativeDecodeProbe {
     try await h.close()
   }
 
+  // Задерживаем две несвязанные передачи и измеряем чтение местного фото. Готовый файл должен
+  // пройти быстро, пока сеть ещё ждёт.
   func testLocalSharpDecodeDoesNotWaitBehindUnrelatedNetworkReads() async throws {
     let h = try await RepositoryHarness.open()
     let media = MediaStore(store: h.store)
@@ -485,6 +524,8 @@ private final class NativeDecodeProbe {
         _, result in try? result.get().close()
       })
     }
+    // Читаем число начатых сетевых чтений под блокировкой. Замер местного файла начинается после
+    // того, как обе фоновые работы заняли очередь.
     func startedCount() -> Int { lock.lock(); defer { lock.unlock() }; return started }
     for _ in 0..<200 where startedCount() < 2 { try await Task.sleep(for: .milliseconds(5)) }
     XCTAssertEqual(startedCount(), 2, "Both unrelated network reads must be blocked before timing")
@@ -503,6 +544,8 @@ private final class NativeDecodeProbe {
     try await h.close()
   }
 
+  // Подготавливаем повёрнутое большое фото как вложение. Проверяем выпрямленные размеры, сжатый
+  // формат, путь сохранения и реальные байты в допустимом размере.
   func testStudioPhotoStagesUprightJPEGWithinUploadSizeLimit() async throws {
     let harness = try await RepositoryHarness.open()
     let media = MediaStore(store: harness.store)
@@ -529,6 +572,8 @@ private final class NativeDecodeProbe {
         atPath: harness.root.appendingPathComponent("media/staging").path), [])
     try await harness.close()
   }
+  // Сохраняем выбранный файл и очередь, затем подаём повреждённое намерение. Ошибка не должна
+  // оставить половину правок или удалить файл с действующей ссылкой.
   func testSelectionIntentProtectsOriginalsAndCorruptionStopsRecoveryBeforeDeletion() async throws {
     let h = try await RepositoryHarness.open(),
       media = MediaStore(store: h.store), fm = FileManager.default
@@ -583,7 +628,8 @@ private final class NativeDecodeProbe {
     XCTAssertFalse(fm.fileExists(atPath: try media.fileURL(selected.relativePath).path))
     try await h.close()
   }
-  // Правила прежнего выпуска сохранены независимо от проверяемого способа разрешения пути
+  // Приводим относительный адрес к фактическому месту прежним способом и проверяем, что он внутри
+  // каталога. Этот путь служит эталоном для новых проверок.
   private func previousFileURL(root: URL, relative: String) throws -> URL {
     let parts = relative.split(separator: "/", omittingEmptySubsequences: false)
     guard !relative.hasPrefix("/"), !parts.isEmpty, !parts.contains(""), !parts.contains(".."),
@@ -597,6 +643,8 @@ private final class NativeDecodeProbe {
     guard file.path.hasPrefix(base.path + "/") else { throw MediaError.corrupt }
     return file
   }
+  // Сверяем обычное чтение и защитный отказ при смене ссылки на каталог или файл. Восстановление
+  // пути должно снова позволить открыть правильный файл.
   func testFileResolutionRejectsTraversalAndLiveMediaSymlinkReplacement() async throws {
     let h = try await RepositoryHarness.open(),
       media = MediaStore(store: h.store), fm = FileManager.default
@@ -650,6 +698,8 @@ private final class NativeDecodeProbe {
       objects.appendingPathComponent("probe.jpg").resolvingSymlinksInPath().standardizedFileURL)
     try await h.close()
   }
+  // Сравниваем два способа повторного поиска существующего файла. Более быстрый путь должен
+  // выдавать тот же адрес без лишних затрат на обход.
   func testFileResolutionAvoidsRedundantMediaRootWalk() async throws {
     let h = try await RepositoryHarness.open(),
       media = MediaStore(store: h.store), fm = FileManager.default
@@ -662,6 +712,8 @@ private final class NativeDecodeProbe {
       _ = try previousFileURL(root: h.root, relative: path)
       _ = try media.fileURL(path)
     }
+    // Многократно получаем адрес и считаем объём строк результата вместе со временем. Объём
+    // подтверждает, что замер действительно выполнил все чтения.
     func batch(_ resolve: () throws -> URL) throws -> Double {
       let start = ProcessInfo.processInfo.systemUptime
       var characters = 0
@@ -689,15 +741,23 @@ private final class NativeDecodeProbe {
     try await h.close()
   }
   private enum QueuedPathRequest: Equatable { case original, localPlayback, remotePlayback }
+  // Занимаем очередь и запрашиваем оригинал. Путь должен проверяться только когда рабочее место
+  // освободится.
   func testOriginalPathValidationWaitsForWorkerAdmission() async throws {
     try await checkQueuedPath(.original)
   }
+  // Проверяем очередь для местного воспроизведения. Ранняя проверка пути не должна выполняться в
+  // вызывающем потоке.
   func testLocalPlaybackPathValidationWaitsForWorkerAdmission() async throws {
     try await checkQueuedPath(.localPlayback)
   }
+  // Проверяем тот же порядок для сетевого воспроизведения. Непригодный адрес получает отказ после
+  // допуска работника.
   func testRemotePlaybackPathValidationWaitsForWorkerAdmission() async throws {
     try await checkQueuedPath(.remotePlayback)
   }
+  // Удерживаем двух работников и подаём выбранный запрос с недопустимым путём. Проверяем
+  // отсутствие раннего ответа, затем освобождаем очередь и ждём ровно один отказ.
   private func checkQueuedPath(_ mode: QueuedPathRequest) async throws {
     let h = try await RepositoryHarness.open(),
       media = MediaStore(store: h.store)
@@ -749,6 +809,8 @@ private final class NativeDecodeProbe {
     let rejected = expectation(description: "Owned path rules reject the escape after admission")
     var admitted = false, replies = 0
     let expected: MediaError = .corrupt
+    // Считаем ответ и отмечаем, пришёл ли он до разрешения работы. Сверяем прежний вид ошибки,
+    // чтобы перенос в очередь не изменил договорённость с вызывающим кодом.
     func complete(_ error: Error?) {
       replies += 1
       if !admitted { premature.fulfill() }
@@ -783,6 +845,8 @@ private final class NativeDecodeProbe {
     XCTAssertEqual(media.bytesUsed, 0)
     try await h.close()
   }
+  // Удерживаем очередь чтения и просим миниатюру с недопустимым путём. Отказ должен прийти один
+  // раз после допуска без сетевого чтения и занятия памяти.
   func testThumbnailPathValidationWaitsForWorkerAdmissionAndRejectsEscape() async throws {
     let h = try await RepositoryHarness.open(),
       media = MediaStore(store: h.store)
@@ -812,6 +876,8 @@ private final class NativeDecodeProbe {
       hold.signal()
       media.close()
     }
+    // Создаём вложение с заданным путём и постоянными сведениями о картинке. Так исход сравнения
+    // определяется именно проверкой адреса.
     func value(_ id: String, _ path: String) -> Attachment {
       Attachment(
         id: id, relativePath: path, mime: "image/jpeg", byteSize: 100, rawWidth: 64, rawHeight: 64,
@@ -855,6 +921,8 @@ private final class NativeDecodeProbe {
     XCTAssertEqual(media.bytesUsed, 0)
     try await h.close()
   }
+  // Готовим кадр, затем делаем исходный каталог недоступным. Уже удерживаемый рисунок должен
+  // вернуться без нового поиска на диске.
   func testDecodedThumbnailSurvivesUnavailableSourceDirectory() async throws {
     let h = try await RepositoryHarness.open(),
       media = MediaStore(store: h.store)
@@ -885,6 +953,8 @@ private final class NativeDecodeProbe {
     XCTAssertEqual(media.bytesUsed, 0)
     try await h.close()
   }
+  // Находим первое фото в описании проверочных файлов. Так сценарии используют согласованный
+  // исходник вместо догадки о его названии.
   private func source() -> URL {
     let root = Bundle(for: RepositoryHarness.self).url(forResource: "fixtures", withExtension: nil)!
     let manifest =
@@ -894,13 +964,16 @@ private final class NativeDecodeProbe {
     let name = files.first { $0["mime"] as? String == "image/jpeg" }!["fileName"] as! String
     return root.appendingPathComponent("media/" + name)
   }
-  /// Сохраняет путь, размеры, поворот, длительность и ключ подложки без повторного чтения файла.
+  // Переносим сведения подготовленного файла в сообщение без нового чтения исходника. Проверки
+  // сохраняют тот же путь, поворот и размеры.
   private func attachment(_ d: AttachmentDraft) -> Attachment {
     Attachment(
       id: d.id, relativePath: d.relativePath, mime: d.mime, byteSize: d.byteSize,
       rawWidth: d.rawWidth, rawHeight: d.rawHeight, orientation: d.orientation,
       durationMs: d.durationMs, thumbnailKey: d.thumbnailKey)
   }
+  // Ждём обычную миниатюру и сверяем переданный номер запроса. Так можно проверить, что готовый
+  // ответ пришёл правильному получателю.
   private func frame(_ media: MediaStore, _ a: Attachment) async throws -> PreparedImage {
     try await withCheckedThrowingContinuation { c in
       _ = media.thumbnail(attachment: a, key: ThumbnailKey(maxPixel: 1024), ticket: 42) {
@@ -910,6 +983,8 @@ private final class NativeDecodeProbe {
       }
     }
   }
+  // Подключаем фото, которое уже было декодировано. Слой должен принять тот же рисунок до
+  // следующего кадра без второго расхода памяти.
   func testCachedPhotoBindsImmediatelyWithoutAnotherPreviewAllocation() async throws {
     let h = try await RepositoryHarness.open(),
       media = MediaStore(store: h.store)
@@ -936,10 +1011,14 @@ private final class NativeDecodeProbe {
     XCTAssertEqual(media.bytesUsed, 0)
     try await h.close()
   }
+  // Готовим маленький файл ленты и больший оригинал. Полноэкранный просмотр должен выбрать
+  // второй, показать его в видимом слое и остаться в пределах памяти.
   func testViewerDecodeUsesOriginalAndDoesNotReuseTimelinePreview() async throws {
     let h = try await RepositoryHarness.open(),
       media = MediaStore(store: h.store)
     defer { media.close() }
+    // Пишем проверочную картинку заданного размера. Разные размеры дают отличить маленький файл
+    // от оригинала по готовому рисунку.
     func imageFile(_ name: String, _ width: Int, _ height: Int) throws -> URL {
       let url = h.root.appendingPathComponent(name),
         destination = try XCTUnwrap(
@@ -984,6 +1063,8 @@ private final class NativeDecodeProbe {
     media.close()
     try await h.close()
   }
+  // Показываем чёткое фото в ленте, затем в галерее и снова при возврате. Проверяем исходные
+  // детали и ограниченный расход, чтобы просмотр не брал маленький файл по ошибке.
   func testStudioPhotoTimelineAndGalleryReuseOriginalPixels() async throws {
     let h = try await RepositoryHarness.open()
     let media = MediaStore(store: h.store, studioOriginals: true)
@@ -994,6 +1075,8 @@ private final class NativeDecodeProbe {
       timeline.close()
       media.close()
     }
+    // Создаём исходник и маленький файл с известными размерами. Проверка сможет точно определить,
+    // откуда пришёл рисунок.
     func fixture(_ name: String, _ width: Int, _ height: Int) throws -> URL {
       let url = h.root.appendingPathComponent(name)
       let output = try XCTUnwrap(
@@ -1044,6 +1127,8 @@ private final class NativeDecodeProbe {
     media.close()
     try await h.close()
   }
+  // Удерживаем четыре готовых фото уходящего чата, пока открываются четыре других. Сверяем
+  // чёткость и память, затем повторяем после её очистки.
   func testFourPhotoAlbumsCanOverlapDuringChatNavigation() async throws {
     let h = try await RepositoryHarness.open()
     let media = MediaStore(store: h.store, studioOriginals: true)
@@ -1076,6 +1161,8 @@ private final class NativeDecodeProbe {
     let new = RetainedChatScene(container: newLayer)
     old.mediaStore = media
     new.mediaStore = media
+    // Подготавливаем фрагмент альбома с четырьмя собственными номерами. Можно различить кадры
+    // старого и нового чата при переходе.
     func snapshot(_ scene: RetainedChatScene, id: MessageID, prefix: String) -> SceneSnapshot {
       let photos = (0..<4).map { index in
         let key = "\(prefix)-\(index)"
@@ -1104,10 +1191,12 @@ private final class NativeDecodeProbe {
             frame: CGRect(x: 0, y: 0, width: prepared.width, height: prepared.height))
         ])
     }
-    /// Возвращает отдельное состояние каждой ячейки, чтобы частичная готовность не скрылась за общим
-    /// признаком.
+    // Ждём готовность всех четырёх ячеек с ограниченным сроком. Возвращаем состояние каждой для
+    // точного сравнения.
     func presented(_ scene: RetainedChatScene, _ id: MessageID) async throws -> [Bool] {
       let deadline = Date().addingTimeInterval(3)
+      // Читаем видимость готовых рисунков по номерам ячеек. Неполный альбом должен остаться
+      // заметен проверке.
       func state() -> [Bool] { (0..<4).map { scene.imageReady(id, attachmentIndex: $0) } }
       while state().contains(false), Date() < deadline {
         try await Task.sleep(for: .milliseconds(10))
@@ -1130,6 +1219,8 @@ private final class NativeDecodeProbe {
       newReady, [true, true, true, true],
       "All four decoded photos should coexist with the outgoing album")
     XCTAssertTrue(new.loadActions().isEmpty)
+    // Берём показываемый кадр каждой ячейки и проверяем его размеры. После сверки отпускаем
+    // копию, чтобы измерение не удерживало память.
     func assertOriginalDetail(_ scene: RetainedChatScene, _ id: MessageID) throws {
       for index in 0..<4 {
         let frame = try XCTUnwrap(scene.preview(id, attachmentIndex: index))
@@ -1167,6 +1258,8 @@ private final class NativeDecodeProbe {
     media.close()
     try await h.close()
   }
+  // Доводим фото до чёткого кадра и затем выдаём запоздалый маленький рисунок. Слой должен
+  // оставить исходные чёткие точки.
   func testTransferredPhotoIsNotReplacedByALateMicroPreview() async throws {
     let h = try await RepositoryHarness.open(),
       media = MediaStore(store: h.store)
@@ -1210,6 +1303,8 @@ private final class NativeDecodeProbe {
     media.close()
     try await h.close()
   }
+  // Имитируем ещё не закрытый предпросмотр и отменяем ожидающий ручной запуск. Камера всё равно
+  // должна ждать подтверждения освобождения прежнего владельца.
   func testCancelledManualReservationAndCaptureStillWaitForRetiringNativePreview() async throws {
     let admission = MediaAdmission(), replacement = MediaAdmission()
     var lifetime: PreviewLifetime!
@@ -1253,6 +1348,8 @@ private final class NativeDecodeProbe {
     XCTAssertEqual(MediaAdmission.previewOwnerCount, 0)
     capture?.release()
   }
+  // Запрашиваем камеру при ещё занятом месте. Съёмка получает разрешение только после
+  // подтверждённого выхода. Для закрытого получателя поздний ответ отменяется один раз.
   func testCaptureAdmissionWaitsForProvenReleaseAndRejectsLateGrant() async throws {
     let admission = MediaAdmission()
     var stopped: (() -> Void)?
@@ -1300,6 +1397,8 @@ private final class NativeDecodeProbe {
     XCTAssertEqual(replies, 1)
     XCTAssertEqual(late.captureActiveCount, 0)
   }
+  // Имитируем ошибку записи и потерю ответа после сохранения. Восстановление не удаляет оригинал
+  // со ссылкой, а повтор не создаёт лишнее сообщение. В конце сверяем целостность базы.
   func testCrashRecoveryDiskFullAndLostReplyPreserveReferencedOriginal() async throws {
     let h = try await RepositoryHarness.open()
     let media = MediaStore(store: h.store)
@@ -1348,7 +1447,8 @@ private final class NativeDecodeProbe {
     media.close()
     try await h.close()
   }
-  /// Повреждённый исходник не должен импортироваться или нарушать предел памяти.
+  // Уменьшаем большое настоящее изображение и проверяем поворот и показ. Повреждённый файл
+  // получает отказ, а кадр старой привязки закрывается один раз.
   func testRealImageDownsampleCorruptionAndStaleMailbox() async throws {
     let h = try await RepositoryHarness.open()
     let media = MediaStore(store: h.store)
@@ -1384,7 +1484,8 @@ private final class NativeDecodeProbe {
     media.close()
     try await h.close()
   }
-  /// После закрытия каждый запрос должен завершиться один раз, а начатые результаты должны освободиться.
+  // Блокируем два активных чтения и переполняем очередь. Проверяем предел в шестнадцать ожидающих
+  // и освобождение принятых рисунков после закрытия.
   func testDecodeQueueHasTwoWorkersAndSixteenPending() async throws {
     let queue = MediaDecodeQueue()
     let hold = DispatchSemaphore(value: 0)
@@ -1424,6 +1525,8 @@ private final class NativeDecodeProbe {
     XCTAssertEqual(probes.count, 2)
     XCTAssertTrue(probes.allSatisfy { $0.closeCount == 1 })
   }
+  // Готовим один цветовой рисунок со всеми восемью вариантами ориентации. Сверяем размеры и углы
+  // результата, чтобы поворот или отражение применились ровно один раз.
   func testAllEightEXIFOrientationsAreAppliedOnce() async throws {
     let h = try await RepositoryHarness.open()
     let media = MediaStore(store: h.store)
@@ -1483,6 +1586,8 @@ private final class NativeDecodeProbe {
     media.close()
     try await h.close()
   }
+  // Проверяем ошибку прав чтения исходника и защиту восстановления от ссылки на внешний каталог.
+  // Файл за пределами рабочего места остаётся цел.
   func testUnreadableSourceAndRecoveryCannotFollowDirectorySymlink() async throws {
     let h = try await RepositoryHarness.open()
     let media = MediaStore(store: h.store)
@@ -1513,6 +1618,8 @@ private final class NativeDecodeProbe {
     try await h.close()
   }
 
+  // Подготавливаем настоящие видео и фото, сохраняем их в чате и читаем кадры. Вид сообщений и
+  // число вложений должны пережить запись.
   func testNativeMediaFormatsStagePersistAndDecodePosters() async throws {
     let h = try await RepositoryHarness.open()
     let media = MediaStore(store: h.store)
@@ -1542,6 +1649,8 @@ private final class NativeDecodeProbe {
     media.close()
     try await h.close()
   }
+  // Отдаём рисунок видимому слою и закрываем запас хранилища. Слой продолжает владеть кадром,
+  // затем при отсоединении отпускает его один раз.
   func testNativeLayerLeaseSurvivesCacheCloseUntilDetach() async throws {
     let h = try await RepositoryHarness.open()
     let media = MediaStore(store: h.store)
@@ -1560,6 +1669,8 @@ private final class NativeDecodeProbe {
     try await h.close()
   }
 
+  // Сначала доказываем, что готовые кадры заняли память. Системное предупреждение должно
+  // освободить уже не видимые рисунки.
   func testSystemMemoryWarningReleasesIdleDecodedCache() async throws {
     let h = try await RepositoryHarness.open(),
       media = MediaStore(store: h.store)
@@ -1575,7 +1686,8 @@ private final class NativeDecodeProbe {
     try await h.close()
   }
 
-  /// После закрытия разговора требует освобождения неиспользуемых сохранённых пикселей.
+  // Закрываем ленту с подготовленными изображениями. Их запас должен освободиться без отдельного
+  // предупреждения памяти.
   func testChatCloseReleasesIdleDecodedCache() async throws {
     let h = try await RepositoryHarness.open(),
       media = MediaStore(store: h.store), admission = MediaAdmission()
@@ -1593,6 +1705,8 @@ private final class NativeDecodeProbe {
     try await h.close()
   }
 
+  // Последовательно читаем много кадров как при прокрутке. Память должна оставаться на размере
+  // небольшого набора последних рисунков.
   func testSerialScrollBurstKeepsOnlySmallDecodedHotSet() async throws {
     let h = try await RepositoryHarness.open(),
       media = MediaStore(store: h.store)

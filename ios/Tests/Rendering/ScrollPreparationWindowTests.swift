@@ -1,9 +1,14 @@
+// Проверяем, сколько текста и вложений готовится вокруг видимой области. Отдельно проверяем
+// инерцию, смену направления и сохранение места при уточнении высот.
+
 import XCTest
 import UIKit
 @testable import Kandinsky
 
 final class ScrollPreparationWindowTests: XCTestCase {
   #if DEBUG
+  // Сдвигаемся внутри уже подготовленных строк и следим, что список слоёв не пересобирается.
+  // Изменение высоты должно один раз сдвинуть слой и пересчитать окно.
   @MainActor func testScrollingWithinReadyRowsReusesTheWindowAndFollowsGeometryChanges() throws {
     let host = ChatScrollHost()
     host.frame = CGRect(x: 0, y: 0, width: 390, height: 400)
@@ -56,6 +61,8 @@ final class ScrollPreparationWindowTests: XCTestCase {
     XCTAssertEqual(host.scene.metrics.windowReconciliations, initialReconciliations + 1)
   }
 
+  // Проверяем строки точно на границах видимости и при смене номера сцены. Прежний слой
+  // сохраняется при движении границы, а новая сцена получает свою подготовку.
   @MainActor func testPreparedFragmentWindowReconcilesInclusiveEdgesAndNewSceneGeneration() throws {
     let host = ChatScrollHost()
     host.frame = CGRect(x: 0, y: 0, width: 390, height: 400)
@@ -105,6 +112,8 @@ final class ScrollPreparationWindowTests: XCTestCase {
     XCTAssertEqual(host.scene.metrics.liveFragments, 1)
   }
 
+  // Считаем обращения к расчёту расстояния для готовых и отсутствующих строк. В очередь должна
+  // попасть только пропущенная разметка.
   @MainActor func testDistanceIsCalculatedOnlyForMissingLayouts() throws {
     let host = ChatScrollHost()
     host.frame = CGRect(x: 0, y: 0, width: 390, height: 400)
@@ -146,6 +155,8 @@ final class ScrollPreparationWindowTests: XCTestCase {
   }
   #endif
 
+  // Запускаем инерцию вдали от края и сверяем вычисленное место остановки с рисунком на экране.
+  // При касании движение останавливается на текущем месте и слой освобождает анимацию.
   @MainActor func testInteriorFlingKeepsItsReleasePositionAndCanBeCaught() throws {
     var now = CACurrentMediaTime()
     let host = ChatScrollHost(scrollClock: { now })
@@ -177,6 +188,8 @@ final class ScrollPreparationWindowTests: XCTestCase {
     XCTAssertTrue(host.plane.layer.animationKeys()?.isEmpty ?? true)
   }
 
+  // Перехватываем движение в обе стороны. Короткое торможение начинается от видимого положения и
+  // гасит сдвиг до нуля, чтобы касание не вызвало скачка.
   @MainActor func testTouchCatchKeepsThePresentedPathUntilTheNextDisplay() throws {
     for destination: CGFloat in [400, 1200] {
       var now = CACurrentMediaTime()
@@ -213,6 +226,8 @@ final class ScrollPreparationWindowTests: XCTestCase {
     }
   }
 
+  // Уточняем высоту строки выше экрана во время инерции у нижнего края. Сверяем сдвиг на прибавку
+  // высоты и проверяем, что движение продолжается.
   @MainActor func testLateLayoutNearBottomPreservesTheVisibleRowAndInertia() throws {
     var now = CACurrentMediaTime()
     let host = ChatScrollHost(scrollClock: { now }, canUseCompositorInertia: true)
@@ -257,6 +272,8 @@ final class ScrollPreparationWindowTests: XCTestCase {
       "Preparing a row above the screen must preserve the story position even near the bottom")
   }
 
+  // Переносим координаты на 35 точек во время движения и проверяем прежнее время запуска
+  // анимации. Иначе под новым местом остановки запустилась бы вторая инерция.
   @MainActor func testInertiaRebasesWithoutRestartingItsLayerAnimation() throws {
     var now = CACurrentMediaTime()
     let host = ChatScrollHost(scrollClock: { now }, canUseCompositorInertia: true)
@@ -290,6 +307,8 @@ final class ScrollPreparationWindowTests: XCTestCase {
     XCTAssertNil(host.plane.layer.animation(forKey: animationKey))
   }
 
+  // Проверяем прокрутку у границы и в режиме без собственной инерции. Положение остановки
+  // остаётся рассчитанным системой без дополнительной анимации слоя.
   @MainActor func testBoundaryAndDisabledInertiaKeepTheNativeLanding() {
     for enabled in [true, false] {
       let host = ChatScrollHost(canUseCompositorInertia: enabled)
@@ -309,6 +328,8 @@ final class ScrollPreparationWindowTests: XCTestCase {
     }
   }
 
+  // Уменьшаем высоту видимой области между замерами движения. Запас подготовки вложений сразу
+  // ограничивается тремя её высотами.
   func testMediaLeadStaysWithinThreeShortViewportsEvenBeforeTheNextMotionSample() {
     var window = ScrollPreparationWindow()
     window.observe(offset: 10000, at: 1, viewport: 150)
@@ -323,6 +344,8 @@ final class ScrollPreparationWindowTests: XCTestCase {
     XCTAssertLessThanOrEqual(window.mediaBefore, 180)
   }
 
+  // Готовим длинную ленту коротких строк и быстро смещаем область просмотра. Видимые записи
+  // должны остаться нарисованными при общем пределе 128 слоёв.
   @MainActor func testFastPreparationKeepsCurrentShortRowsInsideTheFragmentLimit() async throws {
     let h = try await RepositoryHarness.open()
     try await h.store.perform { db in
@@ -386,6 +409,8 @@ final class ScrollPreparationWindowTests: XCTestCase {
     host.close()
     try await h.close()
   }
+  // Прокручиваем в обе стороны и проверяем, что больший запас строится по ходу движения. Даже на
+  // высокой скорости он упирается в предел по высоте окна и числу точек.
   func testRunwayFollowsMotionAndHasFixedPixelAndViewportBounds() {
     var window = ScrollPreparationWindow()
     window.observe(offset: 10000, at: 1, viewport: 680)
@@ -399,7 +424,8 @@ final class ScrollPreparationWindowTests: XCTestCase {
     XCTAssertEqual(window.before, 6144)
     XCTAssertEqual(window.after, 500)
   }
-  /// Запас подготовки должен совпасть, поскольку перенос координат не является движением пальца.
+  // Сравниваем два одинаковых движения с переносом координат в одном из них. Запас подготовки
+  // совпадает, поскольку пересчёт высоты идёт отдельно от движения пальца.
   func testHeightRebaseDoesNotCreateFalseVelocityOrChangeDirection() {
     var reference = ScrollPreparationWindow(), rebased = ScrollPreparationWindow()
     reference.observe(offset: 5000, at: 1, viewport: 680)
@@ -410,6 +436,8 @@ final class ScrollPreparationWindowTests: XCTestCase {
     XCTAssertEqual(rebased.before, reference.before, accuracy: 0.001)
     XCTAssertEqual(rebased.after, reference.after)
   }
+  // Передаём частые малые сдвиги, паузу и неверные значения. Запас должен расти в пределах
+  // ограничения и возвращаться к исходному после простоя.
   func testInputPacketAccumulationIdleAndInvalidValuesStayBounded() {
     var window = ScrollPreparationWindow()
     window.observe(offset: 10000, at: 1, viewport: 680)

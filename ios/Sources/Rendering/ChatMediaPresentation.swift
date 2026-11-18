@@ -1,13 +1,20 @@
+// Показ файлов в ленте на айфоне связывает касание сообщения, полноэкранный просмотр и общий
+// проигрыватель. Один экран владеет поверхностью в каждый момент. При возврате она получает
+// готовый снимок, пока видео снова занимает своё место.
+
 import UIKit
 
 extension ChatScrollHost {
-  /// На время вызова сохраняет этот номер, чтобы альбом открылся на нужной фотографии или видео.
+  // Передаём вместе с сообщением номер выбранного вложения. Сбрасываем временный номер после
+  // вызова, чтобы следующий альбом не открылся на чужой позиции.
   func activateMedia(_ row: Message, frame: CGRect, index: Int = 0) {
     tappedMediaIndex = index
     defer { tappedMediaIndex = 0 }
     onMessageTap?(row, frame)
   }
 
+  // Для увеличения сразу открываем просмотр, а для сохранения и передачи сначала получаем
+  // оригинал. Системное окно показываем только поверх живого чата без другого открытого окна.
   func performMediaAction(_ action: KandinskyMediaAction, row: Message, frame: CGRect) {
     if action == .expand {
       activateMedia(row, frame: frame)
@@ -40,7 +47,9 @@ extension ChatScrollHost {
     }
   }
 
-  /// Проверяет владельца представления, чтобы другой экран не изменял чужую поверхность воспроизведения.
+  // Закрепляем поверхность за лентой и принимаем обновления только от её показа. Касание файла
+  // открывает галерею или отдельное фото. На возврате проверяем, что закрывается именно тот
+  // просмотр, который был открыт.
   func configurePlayback(_ coordinator: MediaCoordinator, media: MediaStore) {
     coordinator.presentationOwner = playbackOwner
     playback = coordinator
@@ -86,8 +95,9 @@ extension ChatScrollHost {
     }
   }
 
-  /// На время просмотра согласует видимость медиа в чате, а после закрытия восстанавливает её только для
-  /// того же окна просмотра.
+  // Открываем галерею на выбранном файле с готовым кадром из ленты. Для результата генерации
+  // оставляем неподвижную ленту под просмотром, а для обычных файлов убираем её медиа целиком. На
+  // возврате восстанавливаем прежнее разрешение движения.
   private func openMediaGallery(_ row: Message, attachmentIndex: Int = 0) {
     guard mediaGallery == nil, photoViewer == nil, let repository, let media = viewerMedia,
       let playback, let surface = playerSurface, let presenter = window?.rootViewController
@@ -115,8 +125,8 @@ extension ChatScrollHost {
     presenter.present(viewer, animated: true)
   }
 
-  /// После закрытия останавливает этот просмотр, восстанавливает видимость чата и вызывает подходящее
-  /// продолжение.
+  // Показываем загруженный исходный ролик по кругу перед улучшением. После закрытия останавливаем
+  // только этот источник, возвращаем видимость и передаём выбранное продолжение.
   func previewStudioVideo(
     _ attachment: Attachment, onEnhance: (() -> Void)? = nil, onClose: @escaping () -> Void
   ) {
@@ -146,6 +156,9 @@ extension ChatScrollHost {
     presenter.present(controller, animated: true)
   }
 
+  // Находим видимую рамку вложения через указатель и готовые размеры строки. При переносе
+  // подставляем сохранённый кадр и ставим поверхность в нужную рамку. Вне экрана останавливаем
+  // показ.
   func updateInlinePlayer() {
     guard mediaGallery == nil, studioPreview == nil, let coordinator = playback,
       let id = coordinator.currentMessageID, let surface = playerSurface
@@ -188,6 +201,8 @@ extension ChatScrollHost {
     surface.attach()
   }
 
+  // Снимаем поверхность со строки. Останавливаем проигрыватель, только если это всё ещё
+  // воспроизведение ленты.
   private func hideInlinePlayer() {
     guard let c = playback else { return }
     playerSurface?.detach()
@@ -197,6 +212,8 @@ extension ChatScrollHost {
     }
   }
 
+  // При закрытии уносим поверхность и освобождаем подписки, владение и воспроизведение, если они
+  // принадлежат этому чату. Другой экран может уже использовать общий проигрыватель.
   func retirePlayerPresentation() {
     guard let c = playback else { return }
     playerSurface?.detach()
@@ -209,8 +226,8 @@ extension ChatScrollHost {
     }
   }
 
-  /// Учитывает открытый просмотр поверх чата, чтобы одни и те же ресурсы не показывались одновременно в двух
-  /// местах.
+  // Разрешаем файлы только для активной сцены без отдельного просмотра поверх чата. При потере
+  // видимости также заканчиваем инерцию и измерение, чтобы скрытая область не двигалась.
   func setMediaVisible(_ visible: Bool) {
     if !visible {
       interruptCompositorFlight()
@@ -222,20 +239,24 @@ extension ChatScrollHost {
     schedule()
   }
 
-  /// Используется при переходах между чатами, чтобы скрытый экран не продолжал движение.
+  // Останавливаем движение перед переходом и запрещаем показ новых кадров. Подготовленные
+  // неподвижные изображения остаются доступными для возврата.
   func pauseForNavigation() {
     interruptCompositorFlight()
     setContentOffset(contentOffset, animated: false)
     setMovingMediaVisible(false)
   }
 
-  /// Запрашивает согласование, чтобы активные поверхности и индикаторы соответствовали новому состоянию.
+  // Отдельно разрешаем движущиеся файлы, учитывая уже открытые просмотры. Назначаем новый кадр,
+  // чтобы убрать или вернуть индикаторы вместе с роликами.
   func setMovingMediaVisible(_ visible: Bool) {
     scene.movingMediaVisible =
       !closed && visible && studioPreview == nil && mediaGallery?.onDeleteResult == nil
     schedule()
   }
 
+  // Подключаем хранилище к сцене и просим новый кадр при готовности изображения. Так готовый файл
+  // появится даже без движения пальца.
   func configureMedia(_ store: MediaStore) {
     scene.mediaStore = store
     scene.onImageReady = { [weak self] in self?.schedule() }

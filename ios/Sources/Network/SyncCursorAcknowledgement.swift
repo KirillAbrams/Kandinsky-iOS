@@ -1,3 +1,6 @@
+// Подтверждает серверу границу уже записанной истории. До ответа держит одну отметку, чтобы два
+// подтверждения не обогнали друг друга при обрыве.
+
 import Foundation
 
 struct CursorAcknowledgement {
@@ -7,6 +10,9 @@ struct CursorAcknowledgement {
 }
 
 extension NetworkSync {
+  // Ищет ещё не подтверждённую границу в базе и отправляет её после возобновления связи.
+  // Запоминает номер соединения, чтобы чтение, начатое до переподключения, не отправило ответ в
+  // новый канал.
   func acknowledgeSavedCursor() {
     guard resumed, cursorAcknowledgement.inFlight == nil else { return }
     if cursorAcknowledgement.lookup != nil {
@@ -36,6 +42,9 @@ extension NetworkSync {
     }
   }
 
+  // Принимает только ответ для ожидаемой границы и сначала записывает его в хранилище. Если
+  // соединение сохранилось, освобождает отметку и проверяет следующую, чтобы после запуска не
+  // подтверждать уже сохранённое снова.
   func confirmSavedCursor(_ frame: WireObject) async throws {
     let cursor = try frame.int("cursor")
     guard cursorAcknowledgement.inFlight == cursor else { return }
@@ -46,6 +55,8 @@ extension NetworkSync {
     acknowledgeSavedCursor()
   }
 
+  // Отменяет незаконченный поиск и очищает ожидание при закрытии соединения. Новому каналу не
+  // приходится ждать ответа, который ушёл по старому.
   func resetCursorAcknowledgement() {
     cursorAcknowledgement.lookup?.cancel()
     cursorAcknowledgement = CursorAcknowledgement()

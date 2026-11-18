@@ -1,6 +1,12 @@
+// Жесты ленты на айфоне переводят касание в действие над конкретной строкой или файл. Системные
+// события прокрутки ведут измерения движения, готовят следующий кадр и сохраняют место чтения
+// после остановки.
+
 import UIKit
 
 extension ChatScrollHost {
+  // По вертикальной точке находим строку в указателе и сверяем её фактическую рамку. Касание в
+  // пустой части ряда поэтому не откроет сообщение.
   private func hit(_ point: CGPoint) -> (Message, CGRect)? {
     let anchor = index.anchorAt(offset: Double(max(0, point.y)))
     guard let id = anchor.messageID, let row = loaded[id], let top = index.top(of: id),
@@ -11,6 +17,8 @@ extension ChatScrollHost {
     return frame.contains(point) ? (row, frame.offsetBy(dx: 0, dy: -viewportOffsetY)) : nil
   }
 
+  // Сначала проверяем повтор загрузки, затем кнопки карточки и отдельные вложения. Координаты
+  // приводим к рамке строки, чтобы соседняя кнопка не получила действие.
   @objc func tapped(_ gesture: UITapGestureRecognizer) {
     let point = gesture.location(in: plane)
     if scene.performLoadAction(at: point) { return }
@@ -43,6 +51,8 @@ extension ChatScrollHost {
     }
   }
 
+  // Открываем меню только в начале долгого касания и над найденным сообщением. Следующие вызовы
+  // того же удержания второе меню не открывают.
   @objc func longPressed(_ gesture: UILongPressGestureRecognizer) {
     if gesture.state == .began, let (row, frame) = hit(gesture.location(in: plane)) {
       onMessageLongPress?(row, frame)
@@ -51,18 +61,21 @@ extension ChatScrollHost {
 }
 
 extension ChatScrollHost: UIScrollViewDelegate, UIGestureRecognizerDelegate {
+  // Исключаем из жестов истории касания на поверхности проигрывателя. Его кнопки и полоса
+  // перемотки обрабатывают ввод сами.
   func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch)
     -> Bool
   {
     guard let surface = playerSurface, let view = touch.view else { return true }
     return !view.isDescendant(of: surface)
   }
-  /// Сбрасывает прежнее ожидающее место чтения, поскольку пользователь уже выбрал новое положение.
+  // Отбрасываем уведомление собственного пересчёта, а при внешнем сдвиге прерываем прежнюю
+  // инерцию. Снимаем старое ожидающее место и готовим строки уже для новой координаты.
   func scrollViewDidScroll(_ scrollView: UIScrollView) {
     guard !applying else { return }
     if let flight = compositorFlight {
       guard abs(contentOffset.y - flight.trajectory.destination) > 0.5 else { return }
-      // UIKit может изменить положение извне, например при переходе ползунком.
+      // Системная прокрутка может сменить положение извне, например при переходе ползунком.
       finishCompositorFlight(at: contentOffset.y, settle: false)
     }
     preparation.observe(
@@ -72,12 +85,16 @@ extension ChatScrollHost: UIScrollViewDelegate, UIGestureRecognizerDelegate {
     schedule()
   }
 
+  // Тормозим предыдущую инерцию при новом жесте и начинаем измерение кадров. Новый палец получает
+  // управление текущим положением.
   func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
     interruptCompositorFlight(braking: true)
     motionProbe.record(.willBeginDragging)
     frameProbe.start()
   }
 
+  // Передаём скорость и расчётную точку остановки в подготовку инерции. Если она подходит
+  // движению, следующие вызовы возьмут её вместо системного разгона.
   func scrollViewWillEndDragging(
     _ scrollView: UIScrollView, withVelocity velocity: CGPoint,
     targetContentOffset: UnsafeMutablePointer<CGPoint>
@@ -85,17 +102,23 @@ extension ChatScrollHost: UIScrollViewDelegate, UIGestureRecognizerDelegate {
     prepareCompositorFlight(velocity: velocity, target: targetContentOffset)
   }
 
+  // Сохраняем итог после обычной системной инерции. Во время своего движения окончание определяет
+  // слой, чтобы чтение не записалось раньше времени.
   func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
     guard !applying, compositorFlight == nil else { return }
     settleScrolling()
   }
 
+  // При отпускании запускаем подготовленное движение, если оно есть. Без движения сразу сохраняем
+  // положение, а с инерцией ждём её окончания.
   func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate: Bool) {
     let composed = beginCompositorFlight()
     motionProbe.record(.didEndDragging, willDecelerate: composed || willDecelerate)
     if !composed && !willDecelerate { settleScrolling(recordEnd: false) }
   }
 
+  // Возвращаем обычный запас подготовки, закрываем замер и выдаём место чтения. Следующее
+  // открытие сможет восстановить последнюю остановку.
   func settleScrolling(recordEnd: Bool = true) {
     if recordEnd { motionProbe.record(.didEndDecelerating) }
     preparation.reset()

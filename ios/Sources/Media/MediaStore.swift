@@ -1,3 +1,6 @@
+// Ведёт местные вложения, подготовленные изображения и источники видео. Следит за допустимыми
+// путями, отменой запросов и общим расходом памяти.
+
 import Foundation
 import UIKit
 import ImageIO
@@ -30,6 +33,8 @@ import Darwin
   private(set) var maximumThumbnailPixel = 1024
   var peakBytesUsed: Int { imageMemoryBudget.peakBytes }
   var bytesUsed: Int { imageMemoryBudget.bytes }
+  // Подключает хранилище к папке владельца, приостанавливает раннее видео во время загрузки фото
+  // и слушает предупреждения о памяти. Иначе фоновые запросы могли бы мешать видимым кадрам.
   init(store: SQLiteStore, studioOriginals: Bool = false) {
     self.store = store
     self.studioOriginals = studioOriginals
@@ -38,17 +43,25 @@ import Darwin
       forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: .main
     ) { [weak self] _ in MainActor.assumeIsolated { self?.trimMemory() } }
   }
+  // Убирает системную подписку на нехватку памяти, если она ещё установлена. Система больше не
+  // должна звать исчезнувшего владельца.
   deinit { if let memoryObserver { NotificationCenter.default.removeObserver(memoryObserver) } }
   /// Файл может ещё отсутствовать, поскольку этот путь также нужен перед загрузкой.
+  // Строит проверенный путь вложения в папке владельца. Допускает, что файл ещё не создан,
+  // поскольку тот же путь нужен перед загрузкой.
   func fileURL(_ relativePath: String) throws -> URL {
     try Self.fileURL(root: store.root, relative: relativePath)
   }
   /// Не начинает загрузку и не подготавливает изображение, поэтому подходит для быстрого выбора способа
   /// показа.
+  // Проверяет наличие исходника после проверки пути. Ничего не скачивает и не читает, поэтому
+  // подходит для выбора способа показа.
   func hasLocalOriginal(_ attachment: Attachment) -> Bool {
     guard let file = try? fileURL(attachment.relativePath) else { return false }
     return FileManager.default.fileExists(atPath: file.path)
   }
+  // Проверяет части относительного пути и выбирает быстрый поиск известных файлов или общую
+  // проверку внутри папки. Недопустимый путь не отдаёт наружу.
   nonisolated static func fileURL(root: URL, relative: String) throws -> URL {
     let parts = relative.split(separator: "/", omittingEmptySubsequences: false)
     guard !relative.hasPrefix("/"), !parts.isEmpty, !parts.contains(""), !parts.contains(".."),
@@ -73,6 +86,9 @@ import Darwin
     guard file.path.hasPrefix(base.path + "/") else { throw MediaError.corrupt }
     return file
   }
+  // Для обычного имени оригинала или миниатюры проверяет папки без перехода по ссылкам и
+  // принимает только обычный либо ещё отсутствующий файл. Остальные случаи остаются общей
+  // проверке пути.
   nonisolated private static func cacheFileURL(root: URL, parts: [Substring]) -> URL? {
     guard root.isFileURL, (root.host ?? "").isEmpty, parts.count == 2,
       parts[0] == "remote" || parts[0] == "previews"
@@ -117,6 +133,8 @@ import Darwin
       directory, isDirectory: true
     ).appendingPathComponent(name, isDirectory: false)
   }
+  // Переводит отказ базы или системы в понятную причину медиа. Сохраняет различие между отменой,
+  // нехваткой места, повреждением и запретом доступа.
   nonisolated static func map(_ error: Error) -> Error {
     if let error = error as? MediaError { return error }
     if let error = error as? RepoError {
@@ -141,9 +159,13 @@ import Darwin
     }
     return MediaError.io
   }
+  // Импортирует присланный файл в постоянную папку вложений. Общая подготовка проверяет его до
+  // передачи черновику.
   func stage(sourceURL: URL, mime: String) async throws -> AttachmentDraft {
     try await stage(sourceURL: sourceURL, mime: mime, directory: "objects")
   }
+  // Выполняет копирование в очереди и при необходимости сначала готовит уменьшенное фото.
+  // Связывает отмену с работой и удаляет копию, если экран уже отказался от готового файла.
   private func stage(
     sourceURL: URL, mime: String, directory: String, prepareStudioPhoto: Bool = false
   ) async throws -> AttachmentDraft {
@@ -176,16 +198,24 @@ import Darwin
         }
       }, onCancel: { cancellation.cancel() })
   }
+  // Импортирует выбранный исходник отдельно от прикреплённых к истории файлов. Его можно убрать
+  // при отмене выбора.
   func stageSelection(sourceURL: URL, mime: String) async throws -> AttachmentDraft {
     try await stage(sourceURL: sourceURL, mime: mime, directory: "selections")
   }
+  // Готовит фото для генерации с допустимыми размерами и сохраняет в папку выбранных исходников.
+  // В очередь отправки не попадает необработанный большой снимок.
   func stageStudioPhoto(sourceURL: URL) async throws -> AttachmentDraft {
     try await stage(
       sourceURL: sourceURL, mime: "image/jpeg", directory: "selections", prepareStudioPhoto: true)
   }
+  // Передаёт один черновой файл общей проверке перед удалением. Даже одиночное удаление должно
+  // учитывать другие ссылки.
   func discardUnpublishedImport(_ draft: AttachmentDraft) async throws {
     try await discardUnpublishedImports([draft])
   }
+  // Сначала проверяет номера и пути всех файлов, затем находит живые ссылки в базе. Убирает
+  // только проверенные незанятые копии, чтобы черновик не потерял исходник.
   func discardUnpublishedImports(_ drafts: [AttachmentDraft]) async throws {
     for draft in drafts {
       let parts = draft.relativePath.split(separator: "/", omittingEmptySubsequences: false)
@@ -217,6 +247,8 @@ import Darwin
     } catch { throw Self.map(error) }
   }
   /// Файл может ещё не попасть в сообщение, но уже быть нужен черновику или очереди отправки.
+  // Собирает пути из вложений, выбора, черновиков и ожидающих отправок. Очистка должна учитывать
+  // файл, даже если он ещё не появился в сообщении.
   nonisolated private static func readReferencedPaths(
     _ db: SQLiteConnection, pending: ((SQLiteConnection) throws -> Set<String>)?
   ) throws -> Set<String> {
@@ -237,6 +269,8 @@ import Darwin
     }
     return referencedPaths
   }
+  // Освобождает место до начала обычной работы, если очередь импорта свободна.
+  // Сначала читает ссылки в базе, затем отдельно удаляет остатки.
   func recover() async throws {
     guard !closed, !recovering else { throw MediaError.cancelled }
     // Восстановление запускается до обычной работы и не пересекается с действующим импортом или декодированием
@@ -260,6 +294,8 @@ import Darwin
     }
   }
 
+  // Чистит временные копии и файлы без ссылок в проверенных каталогах. Перед удалением исходника
+  // отзывает его сохранённые кадры.
   nonisolated private static func deleteUnreferencedFiles(root: URL, referencedPaths: Set<String>) throws {
     let fileManager = FileManager.default
     for directoryName in ["staging", "objects", "selections"] {
@@ -279,13 +315,19 @@ import Darwin
     }
   }
 
+  // Определяет, нужен ли ролик из режима генерации. Это позволяет выбрать отдельную подготовку
+  // для таких вложений.
   func isStudioVideo(_ attachment: Attachment) -> Bool {
     studioOriginals && attachment.mime.hasPrefix("video/")
   }
+  // Проверяет, открывался ли путь недавно на экране просмотра. По отметке можно удержать чёткое
+  // изображение и отложить малую копию.
   func wasShownInGallery(_ attachment: Attachment) -> Bool {
     seenGalleryPaths.contains(attachment.relativePath)
   }
 
+  // Поднимает недавно показанный путь в конец короткого списка. Убирает повтор и старые записи,
+  // чтобы длинная история не росла в памяти.
   func markShownInGallery(_ attachment: Attachment) {
     let path = attachment.relativePath
     if seenGalleryPaths.last == path { return }
@@ -295,6 +337,8 @@ import Darwin
   }
 
   /// Возвращает отдельный признак оригинала, чтобы этот рисунок не смешивался с обычной уменьшенной копией.
+  // Выбирает чтение чёткого снимка из исходника для подходящих сетевых фото. Ограничивает размер
+  // и даёт отдельный ключ, чтобы обычная миниатюра не заняла его место.
   func studioPhotoKey(_ attachment: Attachment, maxPixel: Int? = nil) -> ThumbnailKey? {
     guard studioOriginals, attachment.relativePath.hasPrefix("remote/"),
       ["image/png", "image/jpeg", "image/webp"].contains(attachment.mime)
@@ -305,6 +349,8 @@ import Darwin
   }
   /// Различает обычный кадр истории и изображение из оригинала, чтобы один вариант не заменял другой в
   /// хранилище готовых пикселей.
+  // Считает допустимую сторону, имя готового кадра и требование оригинала. Разные размеры, режимы
+  // и просмотр получают свои записи.
   private func thumbnailParameters(_ attachment: Attachment, _ key: ThumbnailKey) -> (
     size: Int, cacheKey: String, original: Bool
   ) {
@@ -322,12 +368,16 @@ import Darwin
     )
   }
   /// Не начинает загрузку и декодирование, поэтому ячейка может сразу показать известный кадр при привязке.
+  // Возвращает удержание подходящего готового кадра из памяти. Привязка строки не запускает
+  // чтение, если уже есть нужный размер.
   func cachedThumbnail(attachment: Attachment, key: ThumbnailKey) -> PreparedImage? {
     guard !closed, !recovering else { return nil }
     let parameters = thumbnailParameters(attachment, key)
     guard (1...2048).contains(parameters.size) else { return nil }
     return thumbnailCache.frame(parameters.cacheKey)
   }
+  // Для результатов генерации объединяет одинаковые запросы, разделяя местный и сетевой режимы.
+  // Каждый получатель сохраняет свой номер ответа.
   @discardableResult func thumbnail(
     attachment: Attachment, key: ThumbnailKey, ticket: Int, localOnly: Bool = false,
     priority: Int = 1,
@@ -348,6 +398,9 @@ import Darwin
           priority: priority, progress: progress, willDownload: willDownload) { _, result in done(result) }
       }, completion: { completion(ticket, $0) })
   }
+  // Ищет готовые пиксели и местный файл, при необходимости читает сеть и перед разбором
+  // резервирует память. Сохраняет пригодный результат и возвращает отказ или освобождает байты
+  // после отмены.
   private func loadThumbnail(
     attachment: Attachment, key: ThumbnailKey, ticket: Int, localOnly: Bool,
     priority: Int, progress: @escaping (Double) -> Void, willDownload: @escaping () -> Bool,
@@ -489,16 +542,22 @@ import Darwin
     return token
   }
 
+  // Проверяет маленькую картинку и включает её содержимое в ключ. Если путь не менялся, но пришли
+  // новые байты, прежняя подсказка не заменит их.
   private func tinyPreviewKey(_ attachment: Attachment) -> String? {
     guard let text = MediaPreviewStorage.tiny(attachment.tinyPreview) else { return nil }
     return attachment.relativePath + "@tiny:" + text
   }
   /// Возвращает уже подготовленное размытие в ту же привязку, без ожидания очереди.
+  // Берёт уже подготовленное размытие без ожидания очереди. Для этого кадра не нужно снова
+  // открывать оригинал или миниатюру.
   func cachedTinyPreview(_ attachment: Attachment) -> PreparedImage? {
     guard studioOriginals, !closed, let key = tinyPreviewKey(attachment) else { return nil }
     return tinyPreviewCache.frame(key)
   }
   /// Не ждёт загрузки оригинала, поэтому даёт первый рисунок до появления более подробного изображения.
+  // Проверяет и читает маленькую картинку из сообщения, заранее резервируя память для её
+  // подготовки. Сохраняет готовые пиксели в режиме генерации и отдаёт отдельное удержание.
   @discardableResult func tinyPreview(
     _ attachment: Attachment, completion: @escaping (Result<PreparedImage, Error>) -> Void
   ) -> MediaCancellation {
@@ -566,6 +625,8 @@ import Darwin
         }
       })
   }
+  // Собирает источник только из видеодорожки, проверяет время и сохраняет поворот. При отмене
+  // закрывает источник, чтобы фоновая подготовка не держала чтение.
   func silentVideoAsset(_ source: MediaPlaybackSource) async throws -> AVAsset {
     let token = MediaCancellation()
     return try await withTaskCancellationHandler(
@@ -596,6 +657,8 @@ import Darwin
         }
       }, onCancel: { token.cancel() })
   }
+  // Для местного просмотра ищет и удерживает готовый файл, иначе открывает сетевой источник или
+  // оригинал. Отмена закрывает слишком поздно полученный источник.
   func playbackSource(
     _ attachment: Attachment, localOnly: Bool = false
   ) async throws -> MediaPlaybackSource {
@@ -641,6 +704,8 @@ import Darwin
         }
       }, onCancel: { token.cancel() })
   }
+  // Ставит раннее чтение только для подходящего сетевого ролика, ограниченного по размеру.
+  // Источник освобождается после подготовки и при отмене.
   func prepareStudioVideo(_ attachment: Attachment) -> MediaCancellation? {
     guard studioOriginals, !closed, !recovering, attachment.relativePath.hasPrefix("remote/"),
       attachment.mime == "video/mp4", attachment.byteSize > 0,
@@ -657,6 +722,8 @@ import Darwin
   }
   /// Отмена прекращает ожидающее чтение, а готовые изображения соседних сообщений не очищаются из-за
   /// завершения этого запроса.
+  // Получает полный файл, проверяя путь, ход и отмену. Завершение одной загрузки не сбрасывает
+  // рисунки соседних сообщений.
   func ensureOriginal(_ attachment: Attachment, progress: @escaping (Double) -> Void = { _ in })
     async throws -> URL
   {
@@ -678,6 +745,8 @@ import Darwin
     return resolved
   }
   private var navigating = false
+  // На время перехода сохраняет режим удержания кадров для возврата. При выходе оставляет только
+  // ограниченный набор небольших изображений.
   func withNavigationCache<T>(_ action: () throws -> T) rethrows -> T {
     let previous = navigating
     navigating = true
@@ -687,6 +756,8 @@ import Darwin
     }
     return try action()
   }
+  // При переходе оставляет полезные кадры, а при обычной уборке освобождает память миниатюр и
+  // кадров видео. Сохранённые места воспроизведения остаются доступны.
   func releaseIdleImages() {
     if navigating { thumbnailCache.retainNavigationImages() }
     else {
@@ -696,12 +767,18 @@ import Darwin
     }
   }
   /// Используется поверхностями и проигрывателями, чтобы они вовремя завершили работу с прежними ресурсами.
+  // Привязывает остановку экрана или проигрывателя к отдельному номеру. При смене хранилища
+  // готовые ресурсы можно снять до очистки.
   func registerInvalidation(_ action: @escaping () -> Void) -> UUID {
     let id = UUID()
     invalidationHandlers[id] = action
     return id
   }
+  // Убирает действие по номеру, когда его владелец ушёл. Закрытая поверхность больше не получает
+  // сброс.
   func unregisterInvalidation(_ id: UUID) { invalidationHandlers.removeValue(forKey: id) }
+  // Останавливает раннюю подготовку, снимает рисунки и снижает предел памяти и размера. Так
+  // будущие чтения тоже учитывают нехватку места.
   func trimMemory() {
     maximumThumbnailPixel = 512
     videoPreparation.clear()
@@ -711,6 +788,8 @@ import Darwin
     videoPlayback.clearFrames()
     imageMemoryBudget.limit = 24 * 1024 * 1024
   }
+  // Завершает очередь и подписки, закрывает диск и освобождает готовые кадры. После ухода
+  // владельца не остаётся работа с его вложениями.
   func close() {
     guard !closed else { return }
     closed = true
@@ -729,6 +808,8 @@ import Darwin
     thumbnailCache.clear()
     tinyPreviewCache.clear()
   }
+  // Выбирает и создаёт проверенный каталог в папке медиа. Путь через ссылку отклоняется до
+  // записи.
   nonisolated private static func ownedDirectory(root: URL, name: String) throws -> URL {
     let base = root.resolvingSymlinksInPath().standardizedFileURL.appendingPathComponent("media")
     let dir = base.appendingPathComponent(name)
@@ -738,12 +819,16 @@ import Darwin
     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     return dir
   }
+  // Просит систему закрепить изменение каталога после переноса файла. Если диску не хватает
+  // места, возвращает отдельную причину.
   nonisolated private static func syncDirectory(_ url: URL) throws {
     let fd = Darwin.open(url.path, O_RDONLY)
     guard fd >= 0 else { throw MediaError.io }
     defer { Darwin.close(fd) }
     guard fsync(fd) == 0 else { throw errno == ENOSPC ? MediaError.storageFull : MediaError.io }
   }
+  // Проверяет размер файла и исходного рисунка до разбора, уменьшает фото с учётом поворота и
+  // сохраняет для отправки. Слишком большой снимок не занимает память целиком.
   nonisolated private static func prepareStudioPhoto(_ sourceURL: URL, output: URL) throws {
     let size = try sourceURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
     guard (1...64 * 1024 * 1024).contains(size),
@@ -769,6 +854,8 @@ import Darwin
     else { throw MediaError.corrupt }
     try StudioPhotoEncoder().jpeg(image, to: output)
   }
+  // Копирует файл порциями в отдельное временное имя, проверяет содержимое и сохраняет под
+  // постоянным именем. Если возможно, готовит малый кадр для быстрой выдачи.
   nonisolated private static func copyAndProbe(
     sourceURL: URL, root: URL, mime: String, faults: RepositoryFaults, directory: String
   ) throws -> AttachmentDraft {
@@ -830,6 +917,8 @@ import Darwin
     }
     return draft
   }
+  // Читает размеры, поворот или длительность из реального файла и проверяет допустимые границы.
+  // Одного расширения для принятия вложения недостаточно.
   nonisolated private static func probe(
     url: URL, mime: String, id: String, relative: String, bytes: Int64
   ) throws -> AttachmentDraft {
@@ -877,6 +966,8 @@ import Darwin
     }
     return result
   }
+  // Читает уменьшенное фото или первый кадр видео с поправкой поворота. Переносит пиксели в
+  // согласованный формат и отказывает, если размер вышел за предел.
   nonisolated private static func decode(url: URL, mime: String, maxPixel: Int) throws -> CGImage {
     let image: CGImage
     if mime.hasPrefix("video/") {

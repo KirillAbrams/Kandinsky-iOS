@@ -1,10 +1,17 @@
+// Находит скачанные оригиналы и уменьшенные копии, выдаёт файлы для просмотра и освобождает
+// место. Для видео умеет получать по сети отдельные отрезки, пока целого файла ещё нет.
+
 import CryptoKit
 import Foundation
 
 private final class NetworkCacheReadPin: @unchecked Sendable {
   private let lock = NSLock()
   private var release: (() -> Void)?
+  // Запоминает способ освободить файл после чтения. Это позволяет месту загрузки и месту чтения
+  // пользоваться одним счётчиком.
   init(release: @escaping () -> Void) { self.release = release }
+  // Забирает действие освобождения под блокировкой и вызывает его только один раз. Повторное
+  // закрытие не уменьшит число активных чтений ещё раз.
   func close() {
     lock.lock()
     let action = release
@@ -12,6 +19,8 @@ private final class NetworkCacheReadPin: @unchecked Sendable {
     lock.unlock()
     action?()
   }
+  // Освобождает удержание при уничтожении записи чтения. Иначе забытый вызов закрытия оставил бы
+  // файл защищённым от очистки.
   deinit { close() }
 }
 
@@ -20,12 +29,16 @@ private final class NetworkFileResult: @unchecked Sendable {
   private var result: Result<(URL, String), Error>?
   /// После записи результата пробуждает ожидающее чтение, чтобы оно получило либо данные, либо исходную
   /// ошибку.
+  // Сохраняет готовый путь или исходную ошибку под блокировкой, затем будит ожидающее чтение.
+  // Ожидание получает результат целиком, когда запись закончена.
   func complete(_ value: Result<(URL, String), Error>) {
     lock.lock()
     result = value
     lock.unlock()
     ready.signal()
   }
+  // Ждёт путь или ошибку с ограничением времени и читает итог под той же блокировкой. Сбой
+  // загрузки не удерживает место чтения бесконечно.
   func wait() throws -> (URL, String) {
     guard ready.wait(timeout: .now() + 95) == .success else { throw MediaError.io }
     lock.lock()
@@ -37,6 +50,8 @@ struct StudioMediaRemoval: Sendable {
   static let prefix = "studioRemoved:"
   let blob: String, preview: String
   var key: String { Self.prefix + blob }
+  // Принимает удаление, только если оба номера имеют правильные длину и вид. Иначе отметка могла
+  // бы указать на посторонний файл.
   init?(blob: String, preview: String) {
     guard blob.count == 32, preview.count == 32,
       RemoteMediaLocation.validBlobID(blob), RemoteMediaLocation.validBlobID(preview)
@@ -53,6 +68,8 @@ final class NetworkMedia: MediaFileProvider, @unchecked Sendable {
   private var pins: [String: Int] = [:]
   private var revoked = Set<String>()
   /// Останавливает чтение отменой, чтобы сохранённая копия не вернула удалённый результат в историю.
+  // Сверяет начало имени с кратким списком отозванных результатов. При совпадении прерывает новое
+  // чтение, чтобы оно не вернуло уже удалённое из местной копии.
   private func requireAvailable(_ name: String) throws {
     let blob = String(name.prefix(32))
     pinGate.lock()
@@ -61,6 +78,9 @@ final class NetworkMedia: MediaFileProvider, @unchecked Sendable {
     if removed { throw MediaError.cancelled }
   }
   /// После удаления сбрасывает учёт занятого места, чтобы последующая проверка пересчитала его по диску.
+  // Сначала отмечает отзыв, затем ждёт текущую загрузку и убирает оригинал, уменьшенные копии и
+  // сохранённые отрезки. После очистки сбрасывает подсчёт места, иначе следующий расчёт опирался
+  // бы на старый объём.
   func removeCached(_ removal: StudioMediaRemoval) throws {
     pinGate.lock()
     revoked.insert(removal.blob)
@@ -99,6 +119,8 @@ final class NetworkMedia: MediaFileProvider, @unchecked Sendable {
       if fm.fileExists(atPath: file.path) { try fm.removeItem(at: file) }
     }
   }
+  // Связывает файлы с базой и сетью и выбирает отдельные пределы для оригиналов и уменьшенных
+  // копий. Для проверки можно задать общий подсчёт.
   init(
     store: SQLiteStore, api: NetworkAPI, diskBudget: NetworkDiskBudget? = nil,
     originalLimitMiB: Int = 64
@@ -110,7 +132,9 @@ final class NetworkMedia: MediaFileProvider, @unchecked Sendable {
       ?? NetworkDiskBudget(root: store.root, scope: .originals, originalLimitMiB: originalLimitMiB)
     self.previewDiskBudget = diskBudget ?? NetworkDiskBudget(root: store.root, scope: .previews)
   }
-  // Существующая очередь декодирования ограничивает эти ожидающие вызовы двумя фоновыми исполнителями
+  // Ищет готовый файл до ожидания чужой загрузки и снова после него. При отсутствии сверяет
+  // сетевые номера и выбирает оригинал или маленькую копию, скачивает, учитывает занятое место и
+  // удерживает файл до конца чтения.
   func resolve(_ attachment: Attachment, preview: Bool, token: MediaCancellation) throws -> (
     URL, String
   ) {
@@ -202,6 +226,8 @@ final class NetworkMedia: MediaFileProvider, @unchecked Sendable {
     return resolved
   }
   /// Проверяет местную копию без ожидания чужой сетевой загрузки.
+  // Проверяет отмену и отзыв, затем ищет только местную копию. Это позволяет показать готовое
+  // сразу, пока другая фоновая работа ещё ждёт сеть.
   func cached(_ attachment: Attachment, preview: Bool, token: MediaCancellation) throws -> (URL, String)? {
     precondition(!Thread.isMainThread)
     if token.isCancelled { throw MediaError.cancelled }
@@ -209,6 +235,9 @@ final class NetworkMedia: MediaFileProvider, @unchecked Sendable {
     let (relative, location) = try cacheLocation(attachment)
     return try cachedFile(attachment, relative: relative, preview: preview, location: location, token: token)
   }
+  // Находит путь со старым или новым именем и при необходимости добавляет расширение без
+  // перезаписи существующей копии. Принимает готовое сетевое описание, только если путь, тип и
+  // размер совпали.
   private func cacheLocation(_ attachment: Attachment) throws -> (String, RemoteMediaLocation?) {
     var originalRelative = attachment.relativePath
     let original = store.root.appendingPathComponent("media/" + originalRelative)
@@ -236,10 +265,14 @@ final class NetworkMedia: MediaFileProvider, @unchecked Sendable {
     }
     return (originalRelative, knownLocation)
   }
+  // Освобождает файл по сигналу отмены и сразу проверяет, был ли этот сигнал уже дан. Иначе
+  // чтение могло бы начаться после закрытия.
   private func retainRead(_ lease: NetworkCacheReadPin, for token: MediaCancellation) throws {
     token.onCancel { lease.close() }
     if token.isCancelled { throw MediaError.cancelled }
   }
+  // Сначала пытается закрепить готовый оригинал, затем при запросе миниатюры пробует её отдельный
+  // файл. Отмечает время использования, чтобы недавно прочитанную копию не убрали первой.
   private func cachedFile(
     _ attachment: Attachment, relative: String, preview: Bool, location: RemoteMediaLocation?,
     token: MediaCancellation
@@ -267,13 +300,20 @@ final class NetworkMedia: MediaFileProvider, @unchecked Sendable {
     }
     return nil
   }
+  // Строит путь сетевой миниатюры отдельно от оригинала. Это сохраняет разницу качества и
+  // назначения двух файлов.
   private func previewFile(_ blob: String) throws -> URL {
     try localFile("previews/" + blob + ".jpg")
   }
+  // Проверяет допустимость относительного пути и возвращает путь внутри папки медиа. Без проверки
+  // неверное имя могло бы направить чтение в другое место.
   private func localFile(_ relative: String) throws -> URL {
     _ = try MediaStore.fileURL(root: store.root, relative: relative)
     return store.root.appendingPathComponent("media/" + relative)
   }
+  // Отдаёт местный файл, если он уже есть, иначе читает номер и длину из базы и готовит отрезки
+  // для проигрывателя. Удерживает исходник до закрытия, а отозванный файл перестаёт передавать
+  // куски.
   func playback(_ attachment: Attachment, token: MediaCancellation) throws -> MediaPlaybackSource {
     precondition(!Thread.isMainThread)
     try requireAvailable(String(attachment.relativePath.dropFirst("remote/".count)))
@@ -332,6 +372,8 @@ final class NetworkMedia: MediaFileProvider, @unchecked Sendable {
     return MediaPlaybackSource(cache: cache, mime: attachment.mime, blob: blob, onClose: release)
   }
   /// Увеличивает число использований файла, чтобы очистка диска не удалила его во время чтения.
+  // Увеличивает счётчик чтений по пути и возвращает действие для его уменьшения. Очистка
+  // пропускает файл, пока он нужен хотя бы одному читателю.
   private func pin(_ file: URL) -> () -> Void {
     let path = file.standardizedFileURL.path
     pinGate.lock()
@@ -345,11 +387,15 @@ final class NetworkMedia: MediaFileProvider, @unchecked Sendable {
       self.pinGate.unlock()
     }
   }
+  // Определяет, относится ли путь к отдельной папке уменьшенных копий. Так небольшие изображения
+  // учитываются по своему пределу.
   private func budget(for file: URL) -> NetworkDiskBudget {
     file.deletingLastPathComponent().standardizedFileURL
       == store.root.appendingPathComponent("media/previews").standardizedFileURL
       ? previewDiskBudget : diskBudget
   }
+  // Передаёт новые байты подсчёту и разрешает удалить только файлы без активных чтений. Когда
+  // принята миниатюра, проверяет и предел оригиналов.
   private func prune(keep: URL, addedBytes: Int = 0) throws {
     let remove: (URL) throws -> Bool = { file in
       self.pinGate.lock()
@@ -362,6 +408,8 @@ final class NetworkMedia: MediaFileProvider, @unchecked Sendable {
     try current.accept(keep: keep, addedBytes: addedBytes, remove: remove)
     if current !== diskBudget { try diskBudget.accept(keep: keep, remove: remove) }
   }
+  // Выбирает расширение по известному типу файла и использует общее расширение для остальных. Это
+  // даёт постоянный путь для повторного поиска.
   static func fileExtension(_ mime: String) -> String {
     [
       "image/jpeg": "jpg", "image/png": "png", "image/gif": "gif", "image/heic": "heic",
@@ -370,11 +418,15 @@ final class NetworkMedia: MediaFileProvider, @unchecked Sendable {
   }
   /// Использует постоянный номер содержимого и расширение его вида, чтобы повторные обращения находили ту
   /// же местную копию.
+  // Строит имя оригинала из номера его содержимого и расширения. Один сетевой файл при повторном
+  // открытии находится по тому же пути.
   static func relativePath(blob: String, mime: String) -> String {
     "remote/" + blob + "." + fileExtension(mime)
   }
   /// Возвращает разные пути их вложений, чтобы восстановление и очистка учитывали ещё нужные местные
   /// исходники.
+  // Собирает пути вложений из черновика и очереди отправки. Эти файлы ещё нужны, даже если пока
+  // не попали в опубликованную историю.
   static func pendingReferences(_ db: SQLiteConnection) throws -> Set<String> {
     var paths: Set<String> = []
     if let pending = try StudioDraftStorage.load(db) {
@@ -411,6 +463,8 @@ final class NetworkDiskBudget: @unchecked Sendable {
   private let scope: Scope, limit: Int, target: Int
   /// Целевой объём очистки оставляет на восемь мегабайт ниже предела, чтобы после освобождения появился
   /// запас места.
+  // Выбирает папки и предел размера. Цель очистки на восемь мебибайт ниже предела, чтобы после
+  // удаления оставалось место для следующих файлов.
   init(
     root: URL, fileManager: FileManager = .default, scope: Scope = .combined,
     originalLimitMiB: Int = 64
@@ -423,11 +477,15 @@ final class NetworkDiskBudget: @unchecked Sendable {
     self.limit = limitMiB * 1024 * 1024
     self.target = (limitMiB - 8) * 1024 * 1024
   }
+  // Сбрасывает сохранённый подсчёт под блокировкой. Следующая проверка пересчитает папку, если
+  // объём изменился вне учёта.
   func invalidate() {
     lock.lock()
     knownBytes = nil
     lock.unlock()
   }
+  // Добавляет байты к известному объёму без перечитывания папки. При неверном размере или
+  // переполнении сбрасывает подсчёт, чтобы не пользоваться неверным итогом.
   func recordWrite(bytes: Int) {
     lock.lock()
     defer { lock.unlock() }
@@ -440,6 +498,9 @@ final class NetworkDiskBudget: @unchecked Sendable {
       self.knownBytes = overflow ? nil : total
     }
   }
+  // При небольшом добавлении обновляет известный объём. Если предел превышен или подсчёта нет,
+  // перечитывает файлы и удаляет старые до целевого объёма, пропуская нужный файл и занятые
+  // чтением.
   func accept(keep: URL, addedBytes: Int = 0, remove: (URL) throws -> Bool) throws {
     lock.lock()
     defer { lock.unlock() }
@@ -481,10 +542,14 @@ private final class NetworkPlaybackMapping: @unchecked Sendable {
   private var result: Result<(String, Int64), Error>?
   /// После записи результата пробуждает ожидающее чтение, чтобы оно получило либо данные, либо исходную
   /// ошибку.
+  // Сохраняет номер файла и длину или ошибку базы, затем будит чтение видео. Так открытие ждёт
+  // готового описания для запроса отрезков.
   func complete(_ value: Result<(String, Int64), Error>) {
     result = value
     ready.signal()
   }
+  // Возвращает описание исходника или ошибку и прекращает ожидание через десять секунд. Без
+  // предела открытие видео зависело бы от задержки базы.
   func wait() throws -> (String, Int64) {
     guard ready.wait(timeout: .now() + 10) == .success else { throw MediaError.io }
     return try result!.get()

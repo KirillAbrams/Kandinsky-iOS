@@ -1,8 +1,13 @@
+// Проверяет отмену при поиске файла, загрузке и чтении пикселей. После ухода экрана работа либо
+// отменяется, либо возвращает память без показа.
+
 import XCTest
 import ImageIO
 @testable import Kandinsky
 
 @MainActor final class MediaImageWorkQueueTests: XCTestCase {
+  // Подписывает двух получателей на общую работу и снимает их из фонового потока. Первый уход не
+  // мешает второму, а последний сразу останавливает передачу. Новый запрос начинает свою работу.
   func testLastSubscriberCancellationStopsSharedWorkBeforeMainQueueRuns() async {
     let requests = MediaThumbnailRequests(), inner = MediaCancellation()
     let retired = expectation(description: "every subscriber completes once")
@@ -38,18 +43,25 @@ import ImageIO
 
   private enum Phase { case lookup, download, decode }
 
+  // Отменяет запрос, пока он ищет файл. Проверяет, что память под изображение ещё не занята.
   func testCancellationDuringLookupDoesNotAdmitPixels() async throws {
     try await checkRetirement(at: .lookup, closeQueue: false)
   }
 
+  // Закрывает очередь в момент передачи и ждёт отмены. Чтение пикселей не должно начаться после
+  // закрытия.
   func testClosingDuringDownloadCancelsTheFetchAndNeverDecodes() async throws {
     try await checkRetirement(at: .download, closeQueue: true)
   }
 
+  // Отменяет после начала чтения пикселей на настоящем фото из набора. Поздний результат не
+  // показывается и возвращает занятое место.
   func testLateDecodeAfterCancellationReleasesItsCharge() async throws {
     try await checkRetirement(at: .decode, closeQueue: false)
   }
 
+  // Задерживает одну выбранную часть работы на пробном фото, затем отменяет запрос или закрывает
+  // всю очередь. Сверяет одно завершение, остановку передачи и пустой счёт памяти.
   private func checkRetirement(at phase: Phase, closeQueue: Bool) async throws {
     let fixtures = try XCTUnwrap(
       Bundle(for: RepositoryHarness.self).url(forResource: "fixtures", withExtension: nil))
@@ -64,6 +76,8 @@ import ImageIO
     finished.assertForOverFulfill = true
     let release = DispatchSemaphore(value: 0)
     var admissions = 0
+    // Сообщает, что выбранный этап начался, и ждёт разрешения с ограничением времени. Это ставит
+    // отмену в заранее известную точку.
     func hold() throws {
       started.fulfill()
       guard release.wait(timeout: .now() + 3) == .success else { throw MediaError.interrupted }

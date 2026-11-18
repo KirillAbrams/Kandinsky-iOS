@@ -1,9 +1,13 @@
+// Проверяем сохранённые свойства внешнего вида, набор кнопок и состав выпускаемой сборки.
+
 import UIKit
 import XCTest
 
 @testable import Kandinsky
 
 @MainActor final class VisualContractTests: XCTestCase {
+  // Открываем старое звуковое вложение и сверяем подпись, время и нарисованные пиксели. Данные
+  // старой записи сохраняются, но на экране нет прежней дорожки и кнопки воспроизведения.
   func testStoredAudioKeepsCaptionWithoutVoiceControls() throws {
     let attachment = Attachment(
       id: "old-audio", relativePath: "old/audio.m4a", mime: "audio/mp4", byteSize: 147046,
@@ -42,6 +46,8 @@ import XCTest
     XCTAssertEqual(row.attachments.first?.waveform, Array(repeating: 255, count: 64))
   }
 
+  // Ищем проверочные вложения отдельно в приложении и в наборе тестов. Фото должно читаться
+  // только из тестового набора, чтобы выпуск не содержал его копию.
   func testFixtureFilesBelongOnlyToTestBundle() throws {
     XCTAssertNil(Bundle.main.url(forResource: "fixtures", withExtension: nil))
     let fixture = try XCTUnwrap(
@@ -50,6 +56,8 @@ import XCTest
     XCTAssertFalse(data.isEmpty)
   }
 
+  // Загружаем по именам значки генерации, меню и вложений. При случайном исключении нужного файла
+  // проверка назовёт отсутствующий значок.
   func testGenerationArtworkRemainsInApplication() {
     for name in [
       "KandinskyAttachmentCamera", "KandinskyAttachmentPhoto", "KandinskyDrawerAdd",
@@ -63,6 +71,8 @@ import XCTest
     }
   }
 
+  // Открываем упакованный текст лицензии значков и сверяем вид лицензии и имя правообладателя.
+  // Это помогает заметить случайное исключение обязательного файла.
   func testHeroiconsLicenseIsIncludedInApplication() throws {
     let file = try XCTUnwrap(
       Bundle.main.url(forResource: "Heroicons-LICENSE", withExtension: "txt"))
@@ -71,6 +81,8 @@ import XCTest
     XCTAssertTrue(text.contains("Tailwind Labs"))
   }
 
+  // Сверяем метки, размеры и видимость нужных кнопок. У старых действий голосового сообщения,
+  // круглого видео и анимации не должно остаться доступных кнопок.
   func testComposerContainsOnlyGenerationControls() throws {
     let view = ConversationChrome(chatID: 2, onBack: {})
     let expected = ["composer.plus", "composer.model", "composer.settings", "composer.send"]

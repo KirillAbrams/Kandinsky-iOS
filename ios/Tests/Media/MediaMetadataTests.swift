@@ -1,8 +1,15 @@
+// Проверки маленьких кадров, сведений о файлах и повторной отправки. Следим, чтобы быстрый
+// рисунок появлялся сразу, рабочее место кадра не терялось при прокрутке, а добавление
+// необязательной картинки не меняло уже созданное сообщение.
+
 import XCTest
 import ImageIO
 @testable import Kandinsky
 
 @MainActor final class MediaMetadataTests: XCTestCase {
+  // Сначала подаём маленький кадр, затем готовое фото и снова тот же файл. Проверяем, что поздняя
+  // маленькая картинка не закроет чёткий рисунок и кнопка передачи не появится при уточнении
+  // качества.
   func testRebindingPhotoKeepsSharpPixelsAndRejectsLateBlur() async throws {
     let h = try await RepositoryHarness.open()
     let media = MediaStore(store: h.store)
@@ -41,6 +48,8 @@ import ImageIO
     try await h.close()
   }
 
+  // Проверяем, что маленький кадр декодируется в своём размере. Стоимость равна фактическим
+  // строкам памяти изображения, а после освобождения рисунка возвращается к нулю.
   func testTinyPreviewKeepsEncodedPixelSizeAndReleasesMemory() async throws {
     let h = try await RepositoryHarness.open(),
       media = MediaStore(store: h.store)
@@ -78,6 +87,9 @@ import ImageIO
     XCTAssertEqual(media.bytesUsed, 0, "Retiring a preview must release its owned pixels")
     try await h.close()
   }
+  // Сохраняем подготовленное фото и проверяем, что маленький кадр поднимается из базы до
+  // большого. Сдвигаем и меняем слой, отменяем загрузку и повторяем её. Старая запись без
+  // необязательного кадра должна вести к тому же сообщению при повторе.
   func testStagedPreviewSurvivesStorageAndLegacyRetry() async throws {
     let h = try await RepositoryHarness.open(),
       media = MediaStore(store: h.store)
@@ -185,6 +197,8 @@ import ImageIO
     try await h.close()
   }
 
+  // На время действия считаем обращения к фону выбранного слоя. Возвращаем системный обработчик
+  // после замера, чтобы соседние проверки не получили подмену.
   private func countBackgroundReads(for target: CALayer, during action: () -> Void) throws -> Int {
     let selector = #selector(getter: CALayer.backgroundColor)
     let method = try XCTUnwrap(class_getInstanceMethod(CALayer.self, selector))
@@ -206,6 +220,8 @@ import ImageIO
     return reads
   }
 
+  // Считаем установки рамки только для нужного слоя, передавая их исходному обработчику. Так
+  // можно отличить один реальный сдвиг от повторного присваивания тех же координат.
   private func countFrameAssignments(for target: CALayer, during action: () -> Void) throws -> Int {
     let setter = #selector(setter: CALayer.frame)
     let method = try XCTUnwrap(class_getInstanceMethod(CALayer.self, setter))
@@ -227,6 +243,8 @@ import ImageIO
     return assignments
   }
 
+  // Считаем изменения контуров только у переданных слоёв управления. При простом движении строки
+  // их формы должны остаться готовыми.
   private func countPathUpdates(for layers: [CAShapeLayer], while move: () -> Void) throws -> Int {
     let setter = #selector(setter: CAShapeLayer.path)
     let method = try XCTUnwrap(class_getInstanceMethod(CAShapeLayer.self, setter))

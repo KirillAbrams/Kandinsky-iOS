@@ -1,3 +1,6 @@
+// Проверяет маленькие размытые изображения, которые хранятся готовыми на диске. Сверяет их
+// пиксели, ограничение места и обработку повреждённых записей.
+
 import XCTest
 import UIKit
 import CryptoKit
@@ -8,6 +11,8 @@ import Darwin
 @MainActor final class TinyPreviewDiskCacheTests: XCTestCase {
   private struct Input: Decodable { let records: [Record] }
   private struct Record: Decodable { let tinyPreview: String }
+  // Читает первую настоящую миниатюру из сохранённого набора и восстанавливает её байты. Проверки
+  // используют то же представление, которое приходит вместе с историей.
   private func input() throws -> Data {
     let file = try XCTUnwrap(
       Bundle(for: RepositoryHarness.self).url(forResource: "fixtures", withExtension: nil)
@@ -15,6 +20,8 @@ import Darwin
     let records = try JSONDecoder().decode(Input.self, from: Data(contentsOf: file)).records
     return try XCTUnwrap(Data(base64Encoded: try XCTUnwrap(records.first).tinyPreview))
   }
+  // Делает описание фотографии или ролика с переданными байтами миниатюры. Вид вложения позволяет
+  // проверить два разных правила сглаживания.
   private func attachment(_ data: Data, video: Bool = false) -> Attachment {
     Attachment(
       id: "tiny-cache-probe",
@@ -22,6 +29,8 @@ import Darwin
       mime: video ? "video/mp4" : "image/jpeg", byteSize: 10000, rawWidth: 1200, rawHeight: 800, orientation: 1,
       durationMs: nil, thumbnailKey: "", tinyPreview: data.base64EncodedString())
   }
+  // Запрашивает малую картинку через обычное хранилище и ждёт его ответа. Проверка проходит тот
+  // же путь, что и экран.
   private func preview(_ data: Data, media: MediaStore, video: Bool = false) async throws
     -> PreparedImage
   {
@@ -29,6 +38,8 @@ import Darwin
       _ = media.tinyPreview(attachment(data, video: video)) { reply.resume(with: $0) }
     }
   }
+  // Рисует изображение в известном порядке цветов и возвращает его байты. Так можно сравнивать
+  // сами пиксели, даже если рисунки создавались разными способами.
   private func pixels(_ image: CGImage) throws -> Data {
     let context = try XCTUnwrap(
       CGContext(
@@ -39,10 +50,15 @@ import Darwin
     return Data(bytes: try XCTUnwrap(context.data), count: image.width * image.height * 4)
   }
   /// Разные исходники могут попасть в одну ячейку, поэтому запись отдельно проверяет полный отпечаток.
+  // Повторяет расчёт номера ячейки от полного отпечатка. Зная путь, проверка может подставить
+  // неправильную запись или найти два входа для одной ячейки.
   private func cachedFile(_ data: Data, root: URL) -> URL {
     let key = Array(SHA256.hash(data: data)), bucket = (Int(key[0]) * 256 + Int(key[1])) % 4000
     return root.appendingPathComponent(String(format: "media/tiny/%04x.rgba", bucket))
   }
+  // Сравнивает одиннадцать исходных маленьких картинок с обработанными. Сверяет снижение резких
+  // перепадов и сохранение размеров и средней яркости, чтобы увидеть сглаживание без смены
+  // исходника.
   func testLegacyInlineJPEGsDisplaySoftGradients() async throws {
     let h = try await RepositoryHarness.open()
     let media = MediaStore(store: h.store)
@@ -53,12 +69,16 @@ import Darwin
     let records = try JSONDecoder().decode(Input.self, from: Data(contentsOf: fixture)).records
     XCTAssertEqual(records.count, 11)
 
+    // Переводит три цветовых составляющих в взвешенную яркость. Так перепады можно сравнить одним
+    // рядом значений.
     func luminance(_ image: CGImage) throws -> [Int] {
       let bytes = Array(try pixels(image))
       return stride(from: 0, to: bytes.count, by: 4).map {
         (3 * Int(bytes[$0]) + 6 * Int(bytes[$0 + 1]) + Int(bytes[$0 + 2])) / 10
       }
     }
+    // Считает отклонения яркости от двух соседей по каждой оси. Резкая ступень даёт большой
+    // вклад, плавный переход даёт малый.
     func curvature(_ data: [Int], width: Int, height: Int) -> Int {
       var total = 0
       for y in 1..<(height - 1) {
@@ -71,6 +91,8 @@ import Darwin
       return total
     }
 
+    // Складывает квадраты перепадов между соседними точками. Большие перепады влияют сильнее,
+    // поэтому сравнение показывает, что размытие приглушило резкие границы.
     func energy(_ data: [Int], width: Int, height: Int) -> Int {
       var total = 0
       for y in 0..<(height - 1) {
@@ -118,6 +140,8 @@ import Darwin
     try await h.close()
   }
 
+  // Сохраняет настоящий малый кадр, закрывает его и проверяет нулевой расход памяти. Сверяет поля
+  // и пиксели на диске и получает те же байты при повторном открытии.
   func testRealTinyPreviewPersistsLosslessPixelsWithoutRetainingDecodedRAM() async throws {
     let h = try await RepositoryHarness.open(),
       media = MediaStore(store: h.store), data = try input()
@@ -155,6 +179,9 @@ import Darwin
     reopened.close()
     try await h.close()
   }
+  // Подставляет повреждённые записи, неверный вход и лишние байты, затем запрашивает исходную
+  // миниатюру. Каждый раз получает правильные пиксели и восстановленную запись допустимого
+  // размера.
   func testDamagedOversizedAndWrongInputRecordsFallBackToRealJPEG() async throws {
     let h = try await RepositoryHarness.open(),
       media = MediaStore(store: h.store), data = try input()
@@ -194,6 +221,9 @@ import Darwin
     media.close()
     try await h.close()
   }
+  // Подставляет ссылки на чужой файл из временной папки и запрашивает миниатюру. Правильная
+  // картинка остаётся доступной, а внешний контрольный файл не читается как картинка и сохраняет
+  // байты.
   func testDirectoryAndLeafAliasesCannotExposeOrOverwriteAnotherProfile() async throws {
     let h = try await RepositoryHarness.open(),
       media = MediaStore(store: h.store), data = try input()
@@ -240,12 +270,16 @@ import Darwin
     media.close()
     try await h.close()
   }
+  // Готовит один и тот же вход как фото и видео. Размеры должны совпасть, а у ролика сумма
+  // горизонтальных перепадов должна стать меньше.
   func testVideoPlaceholderSmoothsMoreWithoutIncreasingPixelStorage() throws {
     let input = try input()
     let photo = try TinyPreviewDiskCache.prepare(input)
     let video = try TinyPreviewDiskCache.prepare(input, video: true)
     XCTAssertEqual(photo.width, video.width)
     XCTAssertEqual(photo.height, video.height)
+    // Складывает отличия цветовых составляющих между соседями по строке. Меньшее число указывает
+    // на более мягкие переходы.
     func horizontalEdges(_ image: CGImage) throws -> Int {
       let colors = [UInt8](try pixels(image))
       var total = 0
@@ -264,6 +298,8 @@ import Darwin
     XCTAssertLessThan(softenedEdges, originalEdges)
   }
 
+  // Подбирает два разных исходника для одной дисковой ячейки и читает их по очереди. Каждый
+  // возвращает свои пиксели, иначе совпавший номер ячейки показывал бы чужой кадр.
   func testFixedBucketCollisionReplacesTheRightPixelsAndInputIdentity() async throws {
     let h = try await RepositoryHarness.open(),
       media = MediaStore(store: h.store), first = try input()
@@ -305,6 +341,8 @@ import Darwin
     media.close()
     try await h.close()
   }
+  // Подставляет ссылку вместо папки медиа или самого профиля. Используется маленькая картинка из
+  // истории, а рядом с внешним файлом не появляется хранилище.
   func testMediaAndProfileAliasesUseJPEGWithoutCreatingAnExternalCache() async throws {
     let h = try await RepositoryHarness.open(),
       media = MediaStore(store: h.store), data = try input()
@@ -350,10 +388,14 @@ import Darwin
     try await h.close()
   }
   /// Ни один файловый дескриптор не должен оставаться после завершённой подготовки.
+  // Подтверждает, что счётчик видит пробный открытый файл, затем обрабатывает много записей.
+  // Сверяет ограниченный набор имён и размеров и отсутствие оставшихся открытых файлов.
   func testOwnedDiskNamesHaveAFiniteBoundAndDescriptorsRetire() async throws {
     let h = try await RepositoryHarness.open(),
       media = MediaStore(store: h.store), source = try input()
     defer { media.close() }
+    // Считает открытые файловые записи, ведущие в эту временную папку. Разность до и после
+    // показывает, осталась ли незакрытая работа.
     func ownedFDs() -> Int {
       var count = 0
       for descriptor in Int32(0)..<Int32(getdtablesize()) {

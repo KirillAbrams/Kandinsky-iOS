@@ -1,8 +1,13 @@
+// Проверяем, что лента повторно использует готовые слои сообщений, готовит новые рисунки в фоне и
+// освобождает старые. Здесь же сверяем время сообщений и поведение поля при составном вводе.
+
 import XCTest
 import UIKit
 @testable import Kandinsky
 
 final class MessageTimestampTests: XCTestCase {
+  // Получаем эталон часов и минут стандартным форматированием даты в заданном поясе. Отдельный
+  // расчёт позволяет проверить быстрый путь приложения.
   private func reference(_ milliseconds: Int64, zone: TimeZone) -> String {
     let formatter = DateFormatter()
     formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -10,6 +15,8 @@ final class MessageTimestampTests: XCTestCase {
     formatter.timeZone = zone
     return formatter.string(from: Date(timeIntervalSince1970: Double(milliseconds) / 1000))
   }
+  // Сверяем известные отметки у полуночи, в поясе с дробным сдвигом и при смене сезонного
+  // времени. Эти места ловят ошибки округления и перехода через сутки.
   func testKnownMidnightFractionalZoneAndDaylightSavingTimes() throws {
     let utc = try XCTUnwrap(TimeZone(secondsFromGMT: 0)),
       newYork = try XCTUnwrap(TimeZone(identifier: "America/New_York"))
@@ -27,6 +34,8 @@ final class MessageTimestampTests: XCTestCase {
         "\(milliseconds) in \(zone.identifier)")
     }
   }
+  // Сравниваем разные даты и названные часовые пояса с системным форматированием. Отдельно
+  // проверяем вызов без пояса, который должен взять текущую настройку телефона.
   func testNamedZonesAndHistoricAndFutureTimesMatchFoundation() throws {
     let names = [
       "UTC", "Europe/Samara", "America/New_York", "Europe/Paris", "Asia/Kathmandu",
@@ -49,6 +58,8 @@ final class MessageTimestampTests: XCTestCase {
       XCTAssertEqual(MessageTimestamp.string(for: date), reference(date, zone: TimeZone.current))
     }
   }
+  // Форматируем отметки с разными поясами параллельно и повторяем запросы. Так видна ошибка, при
+  // которой один поток получает часовой пояс другого.
   func testConcurrentDifferentZonesHaveNoSharedFormatterState() async throws {
     let zones = try ["UTC", "America/New_York", "Asia/Kathmandu", "Europe/Paris"].map {
       try XCTUnwrap(TimeZone(identifier: $0))
@@ -69,8 +80,13 @@ final class MessageTimestampTests: XCTestCase {
     }
     XCTAssertTrue(valid, "Concurrent layout workers must not exchange timezone or timestamp state")
   }
+  // Сравниваем пакет отметок с созданием системного форматировщика для каждой строки. Контрольная
+  // сумма результатов должна совпасть, а время быстрого пути укладывается в половину времени
+  // образца.
   func testTimestampBatchCostsAtMostHalfTheFreshFormatterPath() throws {
     let zone = try XCTUnwrap(TimeZone(identifier: "Europe/Samara"))
+    // Форматируем много отметок одним способом и возвращаем длительность вместе с контрольным
+    // числом. Число помогает исключить ошибочный замер с пропущенными строками.
     func sample(_ operation: (Int64) -> String) -> (Double, Int) {
       var digest = 0
       let began = ProcessInfo.processInfo.systemUptime
@@ -107,8 +123,8 @@ final class MessageTimestampTests: XCTestCase {
 }
 
 @MainActor final class RetainedSceneTests: XCTestCase {
-  /// Новая сцена не должна блокировать основной поток, но после освобождения обязана получить действительные
-  /// пиксели подписи.
+  // Занимаем защиту текста на рабочем потоке и применяем видимую сцену. Основной поток должен
+  // вернуться сразу, а после освобождения защиты должны появиться пиксели метки.
   func testReconciliationDoesNotWaitForWorkerOwnedTextLock() async throws {
     let prepared = visual(.video), root = CALayer(), scene = RetainedChatScene(container: root)
     let lock = try XCTUnwrap(
@@ -117,6 +133,8 @@ final class MessageTimestampTests: XCTestCase {
       scene.close()
       prepared.close()
     }
+    // Дожидаемся захвата защиты, замеряем действие и ограничиваем ожидание освобождения. Условия
+    // воспроизводят долгую подготовку текста за пределами основного потока.
     func elapsedWithWorkerHoldingLock(_ action: () -> Void) throws -> Double {
       let held = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0),
         finished = DispatchSemaphore(value: 0)
@@ -165,6 +183,8 @@ final class MessageTimestampTests: XCTestCase {
       "Scene reconciliation must return without waiting for a text raster or metadata lock")
     let node = try XCTUnwrap(root.sublayers?.first as? MessageLayer),
       deadline = Date().addingTimeInterval(3)
+    // Ищем в дочернем слое готовые пиксели надписи. Сам факт создания слоя ещё не означает, что
+    // метка нарисована.
     func ready() -> Bool {
       (node.sublayers ?? []).contains { overlay in
         (overlay.sublayers ?? []).contains { $0.contents != nil }
@@ -175,6 +195,8 @@ final class MessageTimestampTests: XCTestCase {
       ready(),
       "Avoiding the lock on main must still publish the real metadata after the worker releases it")
   }
+  // Проверяем, что метки разных вложений появляются позже на маленьких поверхностях. При
+  // повторном использовании рисунок сохраняется, а при снятии слоя его память освобождается.
   func testMediaMetadataDoesNotDrawSynchronouslyAndUsesSmallBackingSurfaces() async throws {
     for kind in [MessageKind.photo, .video, .round, .gif, .sticker] {
       let root = CALayer(), scene = RetainedChatScene(container: root), prepared = visual(kind)
@@ -238,6 +260,8 @@ final class MessageTimestampTests: XCTestCase {
       prepared.close()
     }
   }
+  // Готовим фото с подписью и проверяем, что поверх фото не создан пустой слой меток. Иначе
+  // каждое такое сообщение держало бы лишнюю поверхность.
   func testCaptionedPhotoDoesNotAllocateAnEmptyMetadataLayer() throws {
     let root = CALayer(), scene = RetainedChatScene(container: root),
       prepared = visual(.photo, caption: "Настоящая подпись")
@@ -258,6 +282,8 @@ final class MessageTimestampTests: XCTestCase {
       (node.sublayers ?? []).isEmpty,
       "Caption time is already in the body; there are no overlaid photo marks to rasterize")
   }
+  // Сверяем фоновый рисунок меток с полным образцом на узких и широких вложениях. После смены
+  // версии запоздавший рисунок прежней метки не должен оказаться в новом слое.
   func testAsyncMetadataMatchesFullReferenceAtNativeScalesAndRejectsLateRevision() async throws {
     for scale in [1, 3] {
       for direction in [MessageDirection.incoming, .outgoing] {
@@ -266,6 +292,8 @@ final class MessageTimestampTests: XCTestCase {
             let root = CALayer(), scene = RetainedChatScene(container: root),
               prepared = visual(kind, direction: direction, scale: scale, bound: bound)
             root.bounds = CGRect(x: 0, y: 0, width: prepared.width, height: prepared.height)
+            // Помещаем в сцену один подготовленный фрагмент с её текущим номером. Так смена
+            // версии сообщения проверяется через обычное обновление видимых слоёв.
             func apply(_ value: PreparedText) {
               scene.apply(
                 SceneSnapshot(
@@ -291,6 +319,8 @@ final class MessageTimestampTests: XCTestCase {
             let expected = try XCTUnwrap(
               renderer.image { revision.drawMediaStamp(in: $0.cgContext) }.cgImage)
             let actual = try XCTUnwrap(renderer.image { overlay.render(in: $0.cgContext) }.cgImage)
+            // Перекладываем картинку в одинаковый цвет и записываем четыре составляющие каждого
+            // пикселя. Это позволяет посчитать ошибку только там, где есть нарисованные метки.
             func bytes(_ image: CGImage) throws -> [UInt8] {
               let context = try XCTUnwrap(
                 CGContext(
@@ -341,6 +371,8 @@ final class MessageTimestampTests: XCTestCase {
       }
     }
   }
+  // Передаём сразу 128 фотографий и больше не двигаем видимую область. Все маленькие задачи
+  // должны завершиться сами, иначе часть меток зависла бы до следующего касания.
   func testAllBoundedMetadataJobsCompleteWithoutAnotherScroll() async throws {
     let root = CALayer(), scene = RetainedChatScene(container: root)
     let prepared = (1...128).map { visual(.photo, id: Int64($0)) }
@@ -354,6 +386,8 @@ final class MessageTimestampTests: XCTestCase {
         frame: CGRect(x: 0, y: CGFloat(index) * 240, width: value.width, height: value.height))
     }
     scene.apply(SceneSnapshot(ticket: scene.ticket, fragments: fragments))
+    // Считаем слои, у которых появилась хотя бы одна нарисованная метка. Сравниваем число с
+    // исходным набором, чтобы найти застрявшие задачи.
     func ready() -> Int {
       (root.sublayers ?? []).filter { node in
         (node.sublayers ?? []).contains { overlay in
@@ -370,6 +404,8 @@ final class MessageTimestampTests: XCTestCase {
       "Every admitted scene fragment must finish metadata without waiting for a later scroll or network update"
     )
   }
+  // Собираем вложение нужного вида и готовим его при указанных размерах и версии. Одна заготовка
+  // позволяет менять только свойство, которое проверяется в очередном опыте.
   private func visual(
     _ kind: MessageKind, direction: MessageDirection = .incoming, caption: String = "",
     revision: Int = 1, scale: Int = 3, bound: Int = 304, id: MessageID = 1
@@ -387,8 +423,8 @@ final class MessageTimestampTests: XCTestCase {
       key: TextLayoutKey(
         messageID: id, revision: revision, width: bound, fontSize: 18, scale: scale))
   }
-  /// Узел не должен запускать подготовку пустого текстового рисунка или удерживать полноразмерный прозрачный
-  /// буфер.
+  // Для пяти видов вложений без подписи проверяем отсутствие задания на рисунок и полноразмерной
+  // картинки. Цвет фона и прозрачность можно показать без этой работы.
   func testCaptionlessMediaHasNoStaticBitmapOrPendingRaster() async throws {
     for kind in [MessageKind.photo, .video, .round, .gif, .sticker] {
       let root = CALayer(), scene = RetainedChatScene(container: root), prepared = visual(kind)
@@ -408,6 +444,8 @@ final class MessageTimestampTests: XCTestCase {
       prepared.close()
     }
   }
+  // Сравниваем итоговый фон, прозрачные углы и метки с полным рисунком для обоих направлений
+  // сообщения. Так уменьшение памяти не меняет внешний вид.
   func testCaptionlessNativeBackgroundMatchesReferencePixels() async throws {
     for kind in [MessageKind.photo, .video, .round, .gif, .sticker] {
       for direction in [MessageDirection.incoming, .outgoing] {
@@ -423,6 +461,8 @@ final class MessageTimestampTests: XCTestCase {
           let node = try XCTUnwrap(root.sublayers?.first as? MessageLayer)
           for _ in 0..<200 where node.raster != nil { try await Task.sleep(nanoseconds: 5_000_000) }
           XCTAssertNil(node.raster, "The reference comparison needs the completed scene")
+          // Проверяем, успело ли фоновое рисование заполнить хотя бы одну метку. Сравнение с
+          // полным образцом начинаем только после этого.
           func stampReady() -> Bool {
             (node.sublayers ?? []).contains { overlay in
               (overlay.sublayers ?? []).contains { $0.contents != nil }
@@ -445,6 +485,8 @@ final class MessageTimestampTests: XCTestCase {
               prepared.drawMediaStamp(in: $0.cgContext)
             }.cgImage)
           let actual = try XCTUnwrap(renderer.image { root.render(in: $0.cgContext) }.cgImage)
+          // Приводим снимок и образец к одинаковому цвету и шагу строки. Полученные байты
+          // позволяют сравнить скругления и полупрозрачные метки.
           func pixels(_ image: CGImage) throws -> [UInt8] {
             let context = try XCTUnwrap(
               CGContext(
@@ -472,11 +514,14 @@ final class MessageTimestampTests: XCTestCase {
       }
     }
   }
-  /// Прежний текстовый рисунок не должен появиться над новой системной подложкой.
+  // Сначала готовим фото с подписью, убираем её и возвращаем снова. Слой должен сбросить прежний
+  // рисунок, а сплошной фон исчезнуть после возврата подписи.
   func testMediaRevisionCannotPublishRetiredCaptionRasterOverNativeBackground() async throws {
     let root = CALayer(), scene = RetainedChatScene(container: root)
     let captioned = visual(.photo, caption: "Подпись 👨‍👩‍👧‍👦 مرحبا", revision: 1),
       plain = visual(.photo, revision: 2)
+    // Применяем фрагмент в одних и тех же координатах при каждой смене текста. Тогда видно, что
+    // осталось в том же слое после удаления подписи.
     func apply(_ prepared: PreparedText) {
       scene.apply(
         SceneSnapshot(
@@ -504,7 +549,8 @@ final class MessageTimestampTests: XCTestCase {
     captioned.close()
     plain.close()
   }
-  /// Публикация готовых пикселей не должна запрашивать полный пересчёт истории.
+  // Добавляем новый фрагмент и убеждаемся, что применение сцены не рисует его сразу. Готовые
+  // пиксели обновляют только нужный слой, а удалённый слой не принимает опоздавший рисунок.
   func testNewFragmentRasterDoesNotBlockSceneApplyAndCannotPublishAfterRetirement() async throws {
     let container = CALayer()
     let active = RetainedChatScene(container: container)
@@ -545,6 +591,8 @@ final class MessageTimestampTests: XCTestCase {
       }.cgImage)
     XCTAssertEqual(bitmap.width, reference.width)
     XCTAssertEqual(bitmap.height, reference.height)
+    // Переводим фоновые пиксели и образец в один цветовой формат. Сравниваем готовый рисунок
+    // вместо одного признака, что слой заполнен.
     func pixels(_ image: CGImage) throws -> [UInt8] {
       let context = try XCTUnwrap(
         CGContext(
@@ -581,7 +629,8 @@ final class MessageTimestampTests: XCTestCase {
     XCTAssertNil(retired.contents, "A retired fragment cannot acquire a late bitmap")
     XCTAssertEqual(active.metrics.liveFragments, 0)
   }
-  /// Сверка с внешним состоянием не должна заменить текст или снять отметку текущего ввода.
+  // Начинаем составной ввод и обновляем внешнее состояние. Промежуточный текст и выделенная
+  // область должны остаться до завершения ввода, после чего обычная замена снова действует.
   func testNativeComposingRangeSurvivesStateRefresh() {
     let input = UITextView()
     input.text = "draft"
@@ -596,12 +645,16 @@ final class MessageTimestampTests: XCTestCase {
     XCTAssertNil(input.markedTextRange)
     XCTAssertEqual(input.text, "Привет 👨‍👩‍👧‍👦 é مرحبا")
   }
+  // Создаём простое входящее сообщение с указанным текстом и постоянным номером. Так проверка может
+  // менять содержание, сохраняя остальные условия.
   private func message(_ text: String) -> Message {
     Message(
       id: 1, chatID: 4, order: OrderKey(sortKey: 1, messageID: 1), direction: .incoming,
       savedAtMs: 1, kind: .text, text: text, caption: "", replyToID: nil, revision: 1,
       attachments: [])
   }
+  // Двигаем видимую область и считаем обращения к уже готовому рисунку. Слой и его координаты
+  // сохраняются, а само движение не перечитывает пиксели.
   func testScrollingReadyLayersDoesNotRecheckStaticPixels() async throws {
     let root = CALayer(), scene = RetainedChatScene(container: root)
     let resource = PreparedText(
@@ -640,6 +693,8 @@ final class MessageTimestampTests: XCTestCase {
     XCTAssertEqual(node.frame, fragment.frame)
   }
 
+  // Обновляем положение длинного сообщения без смены разметки. Сохраняем прежние слои и
+  // проверяем, что запрос от старой сцены или закрытого экрана не вернёт их обратно.
   func testPositionOnlyRetainsNodesAndRejectsLateLayout() async throws {
     let scene = RetainedChatScene(container: CALayer())
     let key = TextLayoutKey(messageID: 1, revision: 1, width: 200, fontSize: 17, scale: 1)
@@ -647,6 +702,8 @@ final class MessageTimestampTests: XCTestCase {
       message: message(String(repeating: "مرحبا 👨‍👩‍👧‍👦 é text\n", count: 160)), key: key)
     XCTAssertFalse(resource.fontPostScriptName.contains("Times"))
     XCTAssertGreaterThan(resource.blocks.count, 5)
+    // Собираем положение фрагментов с текущим номером сцены и нужным сдвигом. Это позволяет
+    // отделить движение слоёв от подготовки новых частей.
     func snapshot(_ y: CGFloat) -> SceneSnapshot {
       SceneSnapshot(
         ticket: scene.ticket,
@@ -695,6 +752,8 @@ final class MessageTimestampTests: XCTestCase {
     XCTAssertFalse(scene.accept(afterClose, ticket: scene.ticket))
     XCTAssertEqual(afterClose.closeCount, 1)
   }
+  // Добавляем сообщение через обычное хранилище и ждём обновления полной сцены. Старый слой
+  // остаётся тем же, а вклад нового сообщения в число рисунков равен одному.
   func testRepositoryDeltaRetainsUnchangedNativeNodesThroughFullCoordinator() async throws {
     let h = try await RepositoryHarness.open()
     var ids: [MessageID] = []
@@ -721,11 +780,15 @@ final class MessageTimestampTests: XCTestCase {
       window.isHidden = true
       previous?.makeKey()
     }
+    // Ждём готовности сцены короткими паузами не дольше шести секунд. Если обновление не пришло,
+    // проверка сообщает об этом явно.
     func waitFor(_ condition: () -> Bool) async throws {
       let end = Date().addingTimeInterval(6)
       while !condition(), Date() < end { try await Task.sleep(nanoseconds: 10_000_000) }
       XCTAssertTrue(condition(), "Full coordinator must become ready")
     }
+    // Ищем слой заданного сообщения в дереве сцены. Сравнение найденного объекта показывает, был
+    // ли он переиспользован.
     func layer(_ root: CALayer, _ id: MessageID) -> MessageLayer? {
       if let value = root as? MessageLayer, value.fragment?.id.messageID == id { return value }
       for child in root.sublayers ?? [] { if let value = layer(child, id) { return value } }
@@ -761,6 +824,8 @@ final class MessageTimestampTests: XCTestCase {
     let messageId: Int64, sortKey: Int64, savedAtMs: Int64
     let text: String
   }
+  // Читаем рисунок сцены как четыре байта на пиксель без различий в цветовом пространстве. Данные
+  // нужны для сверки с отдельным образцом.
   private func pixels(_ image: CGImage) throws -> [UInt8] {
     let context = try XCTUnwrap(
       CGContext(
@@ -773,14 +838,18 @@ final class MessageTimestampTests: XCTestCase {
         start: try XCTUnwrap(context.data).assumingMemoryBound(to: UInt8.self),
         count: image.width * image.height * 4))
   }
+  // Запускаем общее сравнение и требуем, чтобы фон закрашивался системным слоем. Пиксели текста
+  // при этом сверяются с прежним рисунком.
   func testTextBubbleUsesNativeFillAndRetainsSharpInkWithOriginalPixels() async throws {
     try await compare(requiresNativeFill: true)
   }
+  // Сверяем текущие слои и пиксели реальных сообщений с отдельным эталоном. Так можно заметить
+  // отличие и у сообщений, для которых требуется обычный полный рисунок.
   func testFrozenReferenceMatchesNativeScenePipeline() async throws {
     try await compare(requiresNativeFill: false)
   }
-  /// Учитывает системное размещение буфера в целых пикселях, чтобы сравнение не исказилось разным началом
-  /// координат.
+  // Готовим сохранённые сообщения двумя способами и сравниваем фон, скругление и буквы. Учитываем
+  // размещение буфера в целых пикселях, чтобы разное начало координат не исказило сверку.
   private func compare(requiresNativeFill: Bool) async throws {
     let fixture = try XCTUnwrap(
       Bundle(for: RepositoryHarness.self).url(forResource: "fixtures", withExtension: nil)

@@ -1,8 +1,13 @@
+// Лента на айфоне сначала получает короткие сведения обо всех сообщениях, а содержимое читает
+// небольшими порциями вокруг нужного места. При обновлении сохраняет знакомые строки и положение
+// чтения. Движение карточки генерации можно показать отдельно от перестройки истории.
+
 import UIKit
 
 extension ChatScrollHost {
-  /// Перед применением проверяет поколение открытия, чтобы поздний ответ не заменил уже выбранный другой
-  /// чат.
+  // Открываем новое окно истории и собираем указатель высот вне потока экрана. Номер открытия
+  // проверяем после ожидания, чтобы поздний ответ из старого чата не заменил уже выбранную
+  // переписку.
   func open(chatID: ChatID, repository: ChatRepository, anchor: ReadingAnchor?) async throws {
     initialIndexReady = false
     self.chatID = chatID
@@ -25,6 +30,9 @@ extension ChatScrollHost {
     schedule()
   }
 
+  // Передаём изменение галерее и проигрывателю. Для новой отправки идём к низу, а в остальных
+  // случаях сохраняем прежнее место, даже если его строку удалили. После сборки указателя
+  // оставляем загруженные строки с прежним порядком и редакцией.
   func apply(_ delta: MessageDelta) {
     guard let repository, let chatID, !closed else { return }
     if metadataTask == nil, patchStudioRows(delta) { return }
@@ -74,7 +82,9 @@ extension ChatScrollHost {
     }
   }
 
-  /// Обновляем карточку на месте, когда меняется только ход генерации. Так история остаётся на месте.
+  // Если изменились только данные уже известных карточек генерации, обновляем их на месте. При
+  // смене вложений оповещаем просмотр, а новую высоту применяем без остановки движения. Полная
+  // перестройка в этом случае лишняя.
   private func patchStudioRows(_ delta: MessageDelta) -> Bool {
     guard delta.inserted.isEmpty, delta.removedIDs.isEmpty, !delta.updated.isEmpty,
       delta.updated.allSatisfy({ row in
@@ -110,6 +120,8 @@ extension ChatScrollHost {
     return true
   }
 
+  // Читаем одну порцию вокруг нужной строки и принимаем её только для того же окна истории. При
+  // ошибке завершаем ожидание первого кадра, чтобы открытие не застряло.
   func requestPage(center: OrderKey) {
     guard pageTask == nil, let pages, let chatID else { return }
     pageRequests += 1

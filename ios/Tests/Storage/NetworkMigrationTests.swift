@@ -1,8 +1,14 @@
+// Проверяет сохранение сетевого состояния, очереди и истории при повторе, старой схеме и открытии
+// базы заново. Несколько сценариев отдельно запускаются при наличии разрешённого сетевого
+// окружения.
+
 import XCTest
 import SQLite3
 @testable import Kandinsky
 
 final class NetworkMigrationTests: XCTestCase {
+  // Сохраняет номер повтора, открывает базу снова и сверяет номер до и после подтверждения.
+  // Запоздалый ответ не должен очистить номер другой операции.
   func testRetryNumberSurvivesReopenUntilItsOwnReplyIsSaved() async throws {
     let harness = try await RepositoryHarness.open()
     let key = "generationRetry:2:9"
@@ -26,7 +32,8 @@ final class NetworkMigrationTests: XCTestCase {
     try await reopened.close()
   }
 
-  /// Старые записи остаются в базе, поэтому обновление не стирает сохранённые данные.
+  // Заполняет очередь выведенными из работы запросами и добавляет новый. Проверяет, что прежние
+  // записи не заняли место для свежей отправки.
   func testRetiredOperationsDoNotConsumePromptCapacity() async throws {
     let harness = try await RepositoryHarness.open()
     try await harness.store.perform { db in
@@ -52,6 +59,9 @@ final class NetworkMigrationTests: XCTestCase {
     try await harness.close()
   }
 
+  // Добавляет неподтверждённые строки и затем применяет серверное подтверждение и обновление
+  // старого порядка. Проверяет, что подтверждённая строка сохранила номер, а ожидающая осталась в
+  // конце.
   func testUnconfirmedPromptsStayAtTailThroughReplayAndLegacyUpgrade() async throws {
     let harness = try await RepositoryHarness.open()
     let local = SQLiteChatRepository(store: harness.store, journal: NetworkJournal(userID: 1))
@@ -60,8 +70,8 @@ final class NetworkMigrationTests: XCTestCase {
     let first = SendCommand(operationID: UUID().uuidString, chatID: 2, text: "First queued prompt")
     let second = SendCommand(
       operationID: UUID().uuidString, chatID: 2, text: "Second queued prompt")
-    /// Все такие сообщения принадлежат одному проверочному чату, чтобы сравнить местную отправку с
-    /// серверным подтверждением.
+    // Собирает ожидаемые поля сообщения под заданными номерами и содержимым. Тест может отличить
+    // исходное местное сообщение от его подтверждения сервером.
     func wire(id: Int64, seq: Int64, sender: Int64, operation: String, text: String) -> [String:
       Any]
     {
@@ -113,10 +123,14 @@ final class NetworkMigrationTests: XCTestCase {
     try await harness.close()
   }
 
+  // Запоминает первое прочитанное расположение оригинала и уменьшенной копии, затем применяет
+  // новую версию. Новые чтения получают замену, а прежний снимок остаётся прежним.
   func testHistoryAndDeltaCarryImmutablePreviewLocationSnapshots() async throws {
     let h = try await RepositoryHarness.open(), cache = NetworkStore(userID: 1)
     let blob = "824d66cce0d64409ad4888a13792c7d4", preview = "b2cf77e3cafb4ba5ad916d15533f3298",
       replacement = String(repeating: "c", count: 64), client = UUID().uuidString.lowercased()
+    // Создаёт порцию истории с заданным номером уменьшенной копии и версией строки. Другие поля
+    // остаются теми же, чтобы изменение адреса можно было проверить отдельно.
     func page(_ preview: String, _ revision: Int) throws -> Data {
       let a: [String: Any] = [
         "id": "source-photo", "blobId": blob, "previewBlobId": preview, "mime": "image/jpeg",
@@ -156,6 +170,8 @@ final class NetworkMigrationTests: XCTestCase {
     try await h.close()
   }
 
+  // Проверяет в сетевом сценарии, что два исходных чата представлены по одному разу и номера
+  // чатов не повторяются. Так начальная выдача не размножит строки списка.
   @MainActor func testAccountListsBothOriginalHistoriesOnce() async throws {
     let profile = try StudioTestServer.profile()
     let api = NetworkAPI(profile: profile)
@@ -169,12 +185,16 @@ final class NetworkMigrationTests: XCTestCase {
     }
   }
 
+  // Загружает последнюю и предыдущую порции длинного чата. Проверяет ограничение числа записей,
+  // строго более раннюю границу и отсутствие пересечения.
   @MainActor func testLongHistoryOpensInTwoBoundedNonoverlappingPages() async throws {
     let profile = try StudioTestServer.profile()
     let api = NetworkAPI(profile: profile)
     defer { api.close() }
     let chat = try await StudioTestServer.chat("Длинная история", api: api)
     let path = "/v1/chats/\(chat)/history?limit=128"
+    // Читает номера порядка из одной порции и проверяет её размер и признак продолжения назад.
+    // Тест затем сравнивает номера между двумя запросами.
     func sequences(_ path: String) async throws -> [Int64] {
       let page = try WireObject(data: await api.json(path))
       XCTAssertEqual(page.value["hasOlder"] as? Bool, true)
@@ -189,6 +209,8 @@ final class NetworkMigrationTests: XCTestCase {
     XCTAssertEqual(Set(older + newest).count, older.count + newest.count)
   }
 
+  // Записывает позицию обмена, открывает базу снова и проверяет ожидание подтверждения.
+  // Подтверждение относится к своему номеру и не скрывает следующий.
   func testSavedCursorWaitsForConfirmationAcrossReopen() async throws {
     let harness = try await RepositoryHarness.open()
     let cache = NetworkStore(userID: 1)
@@ -208,6 +230,8 @@ final class NetworkMigrationTests: XCTestCase {
     try await reopened.close()
   }
 
+  // Обновляет карточку чата и повторяет событие, затем смотрит счётчик и границы истории. Подмена
+  // общих сведений не должна забыть, где закончилась подгрузка.
   func testChatMetadataRefreshPreservesPagingAndDoesNotCountReplayTwice() async throws {
     let h = try await RepositoryHarness.open(), cache = NetworkStore(userID: 1000)
     try await h.store.perform { try NetworkSchema.install($0) }
@@ -250,7 +274,8 @@ final class NetworkMigrationTests: XCTestCase {
     try await h.close()
   }
 
-  /// Поздняя страница прежней истории не должна вернуть скрытое сообщение.
+  // Передаёт пакет с неизвестным событием и проверяет откат всего пакета. Поздняя страница также
+  // не должна вернуть сообщение, которое уже скрыто на телефоне.
   func testReplayRollsBackAsBatchAndLocalTombstoneWinsOverOldHistory() async throws {
     let harness = try await RepositoryHarness.open()
     defer { Task { try? await harness.store.close() } }
@@ -298,6 +323,8 @@ final class NetworkMigrationTests: XCTestCase {
     XCTAssertEqual(count, 0, "Late history must not recreate a hidden message")
   }
 
+  // Проверяет сбой до сохранения и потерю ответа после него. Сообщение и команда должны либо
+  // отсутствовать оба, либо остаться вместе для повтора.
   func testOutboxAndMessageCommitTogetherAcrossLostReply() async throws {
     let harness = try await RepositoryHarness.open()
     try await harness.store.perform { database in try NetworkSchema.install(database) }
@@ -335,6 +362,8 @@ final class NetworkMigrationTests: XCTestCase {
     try await harness.close()
   }
 
+  // Удаляет строку, которую сервер так и не принял, и проверяет очередь. Не должно остаться
+  // удаления для несуществующего серверного сообщения.
   func testRemovingRejectedMessageDoesNotLeaveBlockingDelete() async throws {
     let harness = try await RepositoryHarness.open(), store = harness.store
     try await store.perform { try NetworkSchema.install($0) }
@@ -351,6 +380,8 @@ final class NetworkMigrationTests: XCTestCase {
     try await harness.close()
   }
 
+  // Открывает файл прежней версии и читает сохранённый текст после добавления поля доставки.
+  // Старая строка получает обычное местное состояние и остаётся доступной.
   func testVersionTwoHistorySurvivesAddingDeliveryState() async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(
       "network-v2-" + UUID().uuidString)
@@ -415,10 +446,14 @@ final class NetworkMigrationTests: XCTestCase {
     XCTAssertEqual(values.first?.1, "local")
     try await store.close()
   }
+  // Обновляет собственное вложение с прежним и изменённым номером файла. Проверяет, что местную
+  // копию повторно используют только при совпадении номера.
   func testOwnMediaRevisionKeepsOnlyAMatchingCachedBlob() async throws {
     let h = try await RepositoryHarness.open(), cache = NetworkStore(userID: 1)
     let client = UUID().uuidString.lowercased(), oldBlob = String(repeating: "a", count: 64),
       newBlob = String(repeating: "b", count: 64)
+    // Формирует страницу с точным номером файла и версией сообщения. Так тест отдельно меняет
+    // содержимое вложения и сверяет его с сохранённой копией.
     func page(_ blob: String, _ revision: Int) throws -> Data {
       let a: [String: Any] = [
         "id": "wire-image", "blobId": blob, "mime": "image/jpeg", "byteSize": 100, "rawWidth": 120,

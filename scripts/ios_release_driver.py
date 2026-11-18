@@ -1,6 +1,12 @@
+# Готовит копию плана измерения для сборки выпуска айфона. Указывает собранное приложение,
+# сохраняя обычный набор проверок и настройки проекта.
+
 """Prepare only the generated performance driver, without changing app/test schemes."""
 
 
+# Убирает только проверку главного потока из списка загружаемых библиотек. Если находит
+# измерительные средства поиска ошибок памяти или потоков, прекращает подготовку, чтобы не смешать
+# разные условия.
 def clean_injection(value):
     libraries = value.split(":")
     if any(
@@ -11,6 +17,8 @@ def clean_injection(value):
     return ":".join(item for item in libraries if "libMainThreadChecker.dylib" not in item)
 
 
+# Рекурсивно заменяет путь к запускаемому приложению и раскрывает относительные пути к результатам
+# сборки. Исходное описание остаётся пригодным для обычных тестов.
 def patch_driver(value, release, products):
     if isinstance(value, dict):
         result = {}

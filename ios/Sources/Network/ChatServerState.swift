@@ -1,6 +1,11 @@
+// Хранит на телефоне полученное с сервера состояние чата. Отметки об удалении нужны, чтобы
+// запоздалое сообщение не попало обратно в ленту.
+
 import Foundation
 
 enum ChatServerState {
+  // Дополняет строку списка сведениями об архиве, звуке и отметке о прочтении. Скрытый или
+  // покинутый чат помечает скрытым, иначе список показывал бы его как обычный.
   static func decorate(_ db: SQLiteConnection, _ summary: ChatSummary) throws -> ChatSummary {
     let value = try state(db, chat: summary.id)
     var result = summary
@@ -10,6 +15,8 @@ enum ChatServerState {
     result.hidden = value["hidden"] as? Bool == true || value["left"] as? Bool == true
     return result
   }
+  // Читает последнее сохранённое описание чата по его номеру. Если сведений ещё нет, возвращает
+  // пустое описание, чтобы список мог показаться до обмена с сервером.
   static func state(_ db: SQLiteConnection, chat: Int64) throws -> [String: Any] {
     guard
       let raw = try db.rows("SELECT payload FROM net_chat_states WHERE chatID=?", [.integer(chat)])
@@ -18,6 +25,9 @@ enum ChatServerState {
     return try WireObject(data: Data(raw.utf8)).value
   }
 
+  // Проверяет номер чата, размер и версию ответа. Сохраняет наибольшую границу очистки, помечает
+  // старые сообщения удалёнными, убирает их из ленты и обновляет закрепление и счётчик.
+  // Возвращает номера снятых строк, чтобы вызывающий код обновил экран.
   static func applyState(_ db: SQLiteConnection, chat: Int64, value: Any?) throws -> [Int64] {
     guard let value, !(value is NSNull) else { return [] }
     let wire = try WireObject(value), version = try wire.int("version"),
@@ -69,6 +79,8 @@ enum ChatServerState {
     return ids
   }
 
+  // Проверяет отметку об удалении сообщения и границу очистки чата. Если сообщение подходит хотя
+  // бы под одно условие, поздняя доставка его уже не вернёт.
   static func isHidden(_ db: SQLiteConnection, server: Int64, chat: Int64, seq: Int64) throws
     -> Bool
   {

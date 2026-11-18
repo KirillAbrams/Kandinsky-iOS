@@ -1,6 +1,11 @@
+// Выбирает постоянную папку с данными приложения на айфоне. При обновлении переносит старое
+// хранилище целиком, чтобы база, черновики и незавершённые операции остались вместе.
+
 import Foundation
 
 enum AppDataRoot {
+  // Помечает папку как исключённую из резервной копии. Если система не примет отметку, сообщает
+  // об ошибке, чтобы приложение не продолжило работу с неверно настроенным хранилищем.
   private static func excludeFromBackup(_ directory: URL) throws -> URL {
     var location = directory
     var values = URLResourceValues()
@@ -9,7 +14,9 @@ enum AppDataRoot {
     return location
   }
 
-  /// Переносим старую папку целиком, чтобы сохранить вместе базу, черновики и незавершённые операции.
+  // Открывает существующую папку Кандинского или переносит в неё единственное подходящее старое
+  // хранилище. При двух кандидатах останавливается, чтобы случайно не выбрать чужую или неполную
+  // историю.
   static func resolve(_ base: URL) throws -> URL {
     let manager = FileManager.default
     try manager.createDirectory(at: base, withIntermediateDirectories: true)
@@ -39,6 +46,9 @@ enum AppDataRoot {
     return try excludeFromBackup(target)
   }
 
+  // Ищет обычный файл базы в папке известного вида либо пустую отметку о незавершённом удалении
+  // аккаунта. Без второго условия обновление могло бы забыть про очистку, если основной базы уже
+  // нет.
   private static func containsSavedState(_ root: URL) throws -> Bool {
     let manager = FileManager.default
     for child in try manager.contentsOfDirectory(

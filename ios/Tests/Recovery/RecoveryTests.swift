@@ -1,6 +1,12 @@
+// Проверки восстановления на айфоне при заполнении диска и смене владельца воспроизведения.
+// Старые сообщения и исходники должны пережить ошибку, а следующий запрос получает место только
+// после снятия предыдущего.
+
 import XCTest
 @testable import Kandinsky
 @MainActor final class RecoveryTests: XCTestCase {
+  // Ждём выполнения условия короткими паузами с общим пределом. Если подготовка не закончилась,
+  // проверка сообщает об этом вместо бесконечного ожидания.
   private func wait(_ condition: () -> Bool) async throws {
     let end = Date().addingTimeInterval(8)
     while Date() < end {
@@ -9,6 +15,8 @@ import XCTest
     }
     XCTAssertTrue(condition(), "Native release/preparation exceeded8seconds")
   }
+  // Просим два экземпляра приложения подготовить видео через общее разрешение. Суммарно должен
+  // работать один проигрыватель, затем он переходит ко второму владельцу.
   func testTwoRuntimesCannotCreateOverlappingNativePlayers() async throws {
     let h = try await RepositoryHarness.open(),
       media = MediaStore(store: h.store)
@@ -50,6 +58,8 @@ import XCTest
     try await h.close()
   }
 
+  // Заполняем временную базу до настоящего отказа записи. Проверяем прежнее сообщение,
+  // целостность и черновик, затем освобождаем место и повторяем ту же команду.
   func testRealSQLiteFullRollsBackAndExactRetryWorks() async throws {
     let h = try await RepositoryHarness.open()
     _ = try await h.repo.send(SendCommand(operationID: "preserved", chatID: 2, text: "keep"))
@@ -72,8 +82,10 @@ import XCTest
     XCTAssertEqual(try h.rawScalar("SELECT COUNT(*) FROM messages"), 2)
     try await h.close()
   }
-  // Принудительный обрыв записи включён в MediaStore только в отладочной сборке.
+  // Принудительный обрыв записи доступен в хранилище файлов только в отладочной сборке.
   #if DEBUG
+  // Имитируем нехватку места посреди записи выбранного файла. Частичный временный след убирается,
+  // прежнее вложение сохраняет байты и ссылку.
   func testPartialStagingNoSpaceCleansTempAndPreservesCommittedBytes() async throws {
     let h = try await RepositoryHarness.open(),
       media = MediaStore(store: h.store)
@@ -106,6 +118,8 @@ import XCTest
   }
   #endif
 
+  // Удерживаем настоящий рабочий поток записи и подаём много задач. Очередь принимает только
+  // заданное число, поэтому задержка базы не копит бесконечную работу.
   func testSQLiteSubmissionQueueIsBoundedWhileWriterHeld() async throws {
     let h = try await RepositoryHarness.open(), held = DispatchSemaphore(value: 0),
       started = expectation(description: "native SQLite writer held")

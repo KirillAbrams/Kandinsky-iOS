@@ -1,3 +1,6 @@
+// Ведёт сетевой обмен выбранного аккаунта. Открывает связь на переднем плане, сохраняет ответы
+// через местную базу и направляет изменения на экран.
+
 import Foundation
 
 @MainActor final class NetworkSync {
@@ -36,6 +39,8 @@ import Foundation
   var studioTransfers: [StudioTransfer] = []
   var onStudioTransfersChanged: (() -> Void)?
 
+  // Связывает профиль, базу, местную историю и сетевой клиент. Передаёт отказ входа и готовые
+  // изменения общим обработчикам, чтобы экран не следил за соединением сам.
   init(
     profile: NetworkProfile, store: SQLiteStore, local: SQLiteChatRepository, api: NetworkAPI? = nil
   ) {
@@ -48,6 +53,8 @@ import Foundation
     ui.deliver = { [weak self] in self?.onDeltas?($0) }
   }
 
+  // Отмечает действие владельца в серверном сеансе не чаще одного раза за тридцать секунд. При
+  // обрыве следующее действие снова может подтвердить вход, а отказ доступа завершает сеанс.
   func userInteraction() {
     let now = ProcessInfo.processInfo.systemUptime
     guard !closed, !rejectedSession, now >= nextActivityAt else { return }
@@ -63,12 +70,17 @@ import Foundation
     }
   }
 
+  // Начинает связь при показе приложения и разрывает её при уходе с экрана. Это прекращает лишнюю
+  // работу для скрытого приложения.
   func foreground(_ value: Bool) {
     guard !closed else { return }
     active = value
     if value { connect() } else { disconnect() }
   }
   /// У каждого подключения свой номер. По нему отбрасываем поздние ответы от уже закрытого соединения.
+  // Выбирает первый снимок или список чатов, сохраняет его и просит события с последнего номера.
+  // Проверяет номер подключения после ожиданий и ограничивает срок подтверждения, чтобы старые
+  // ответы не влияли на восстановленную связь.
   private func connect() {
     guard active, !closed, socket == nil, receiveTask == nil else { return }
     connectionEpoch += 1
@@ -123,6 +135,8 @@ import Foundation
     }
   }
 
+  // Снимает срок ожидания подтверждения, запускает проверку связи и продолжает очистку, отправку
+  // и чтение открытого чата. Без этого сеть выглядела бы открытой, пока местная очередь ещё ждёт.
   func connectionResumed(connectionID: Int) {
     resumeTimeout?.cancel()
     resumeTimeout = nil
@@ -136,6 +150,8 @@ import Foundation
     if let currentChat = history.currentChat { refreshVisibleHistory(currentChat) }
   }
 
+  // Отправляет запрос удаления с паролем. Ответ о том, что аккаунт уже удалён, принимает как
+  // завершение, поскольку подтверждение прежней попытки могло потеряться.
   func eraseStudioAccount(password: String) async throws {
     let body = try JSONEncoder().encode(["password": password])
     do {
@@ -146,6 +162,8 @@ import Foundation
       // Аккаунт мог удалиться на сервере до того, как телефон получил подтверждение.
     }
   }
+  // Один раз останавливает связь и сообщает экрану, истёк вход или удалён аккаунт. Различие
+  // важно, чтобы при удалении убрать местные сведения владельца.
   func sessionRejected(_ code: String) {
     guard !rejectedSession else { return }
     rejectedSession = true
@@ -158,6 +176,8 @@ import Foundation
     }
   }
 
+  // Проверяет наличие соединения и размер сообщения перед отправкой. Слишком большой или
+  // непригодный пакет не передаётся, иначе он занял бы лишнее место в сетевой очереди.
   func send(_ value: [String: Any]) async throws {
     guard let socket else { throw RepoError.io }
     let data = try await api.encode(value)
@@ -167,6 +187,8 @@ import Foundation
     try await socket.send(.string(text))
   }
 
+  // После периода без входящих пакетов проверяет, отвечает ли ещё связь. Если ни ответ, ни другое
+  // событие не пришли в отведённый срок, восстанавливает соединение.
   private func startHeartbeat(_ connectionID: Int) {
     guard heartbeatTask == nil else { return }
     heartbeatTask = Task { [weak self] in
@@ -195,7 +217,8 @@ import Foundation
       }
     }
   }
-  // После переподключения очередь дочитает из SQLite команды без подтверждения.
+  // Разрывает только сбойное текущее соединение и увеличивает задержку при повторных отказах.
+  // Очередь остаётся в базе, поэтому при восстановлении можно отправить неподтверждённые команды.
   func reconnectAfterFailure(_ connectionID: Int) {
     guard connectionID == connectionEpoch, active, !closed else { return }
     disconnect()
@@ -210,6 +233,8 @@ import Foundation
       self.connect()
     }
   }
+  // Меняет номер соединения, останавливает чтение, ожидания и сетевые проверки и сбрасывает
+  // незавершённую отправку. Поздние ответы закрытого соединения теперь можно распознать.
   private func disconnect() {
     connectionEpoch += 1
     resumed = false
@@ -226,6 +251,8 @@ import Foundation
     heartbeatTask?.cancel()
     heartbeatTask = nil
   }
+  // Убирает обратные вызовы, останавливает работу с медиа и закрывает сетевой клиент и очередь
+  // экрана. Иначе закрытый обмен мог бы продолжать держать ресурсы прежнего владельца.
   func close() {
     api.onSessionRejected = nil
     removalTask?.cancel()

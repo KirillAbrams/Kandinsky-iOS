@@ -1,3 +1,6 @@
+// Делает отдельную уменьшенную картинку для фото или видео и ещё меньшую размытую копию. Их
+// размер ограничен, чтобы показать их без передачи оригинала.
+
 import Foundation
 import ImageIO
 import AVFoundation
@@ -7,10 +10,15 @@ import UniformTypeIdentifiers
 
 enum MediaPreviewGenerator {
   /// Использует криптографический отпечаток пути, чтобы не переносить его знаки в имя файла.
+  // Получает постоянное имя из контрольной суммы пути. Знаки исходного пути не становятся частью
+  // имени уменьшенной копии.
   static func derivedName(_ relative: String) -> String {
     let hash = SHA256.hash(data: Data(relative.utf8)).map { String(format: "%02x", $0) }.joined()
     return "local-" + hash + ".jpg"
   }
+  // Проверяет папку и повторно использует готовую копию. Для видео извлекает первый кадр, для
+  // фото читает уменьшенное изображение с поправкой поворота. Убирает только старые производные
+  // копии.
   static func normalFile(root: URL, relative: String, file: URL, mime: String) throws -> URL {
     let directory = root.appendingPathComponent("media/previews")
     guard directory.resolvingSymlinksInPath().path == directory.standardizedFileURL.path else {
@@ -57,6 +65,8 @@ enum MediaPreviewGenerator {
     }
     return target
   }
+  // Уменьшает готовый кадр, смягчает границы и сохраняет байты в текстовом виде под строгим
+  // пределом. Лента может получить такую картинку вместе с историей.
   static func tiny(normal: URL) throws -> String {
     guard let source = CGImageSourceCreateWithURL(normal as CFURL, nil),
       let small = CGImageSourceCreateThumbnailAtIndex(
@@ -78,6 +88,8 @@ enum MediaPreviewGenerator {
     guard data.count <= 3072 else { throw MediaError.unavailable }
     return data.base64EncodedString()
   }
+  // Сжимает одно изображение с указанным качеством и проверяет завершение записи и размер.
+  // Слишком большая или неполная копия возвращает ошибку.
   static func jpeg(_ image: CGImage, quality: Double) throws -> Data {
     let bytes = NSMutableData()
     guard

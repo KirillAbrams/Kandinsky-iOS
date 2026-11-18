@@ -1,8 +1,13 @@
+// Проверки возврата к уже открытым чатам и медиа на айфоне. Сохранённые кадры должны появляться
+// сразу, но уход с экрана и нехватка памяти по-прежнему освобождают ненужное.
+
 import XCTest
 import UIKit
 @testable import Kandinsky
 
 @MainActor final class WarmNavigationCacheTests: XCTestCase {
+  // Вызываем быстрый поиск после очистки рисунка из памяти. Отсутствие результата означает, что
+  // чтение с диска нужно назначить отдельно, а экран не ждёт его внутри вызова.
   func testFrameLookupDoesNotReadDiskOnTheUiThread() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
@@ -26,6 +31,8 @@ import UIKit
     XCTAssertEqual(budget.bytes, 0)
   }
 
+  // Меняем карточку из двух видео на одно. Проверяем, что слой сообщения остаётся, один ролик
+  // закреплён за ним, а прежние связи альбома сняты.
   func testAlbumBecomingSingleKeepsOnlyTheRemainingVideoBinding() async throws {
     let h = try await RepositoryHarness.open()
     let media = MediaStore(store: h.store, studioOriginals: true)
@@ -40,6 +47,8 @@ import UIKit
       byteSize: 100, rawWidth: 640, rawHeight: 360, orientation: 1, durationMs: 3000,
       thumbnailKey: "two")
     defer { scene.close(); media.close() }
+    // Собираем одну редакцию сообщения с переданным набором файлов и применяем её к сцене.
+    // Возвращаем слой, чтобы сравнить его до и после удаления ячейки.
     func show(_ attachments: [Attachment], revision: Int) throws -> MessageLayer {
       let row = Message(id: 79001, chatID: 2, order: OrderKey(sortKey: 1, messageID: 79001),
         direction: .incoming, savedAtMs: 0, kind: .video, text: "", caption: "", replyToID: nil,
@@ -60,11 +69,15 @@ import UIKit
     scene.close(); media.close(); try await h.close()
   }
 
+  // Заполняем память позициями разных сообщений, проверяем предел и размер кадра. После смены
+  // номера запоздалый рисунок не должен вернуться, а полная очистка сбрасывает позицию и память.
   func testVideoReturnCacheBoundsIdentityAndLateInvalidation() throws {
     let budget = ImageByteBudget(), cache = VideoPlaybackCache(budget: budget)
     let attachment = Attachment(id: "same", relativePath: "media/same.mp4", mime: "video/mp4",
       byteSize: 100, rawWidth: 1920, rawHeight: 1080, orientation: 1, durationMs: 3000,
       thumbnailKey: "same")
+    // Используем один путь ролика с разными номерами сообщений. Так проверка отличает совпадение
+    // файла от совпадения конкретного проигрывания.
     func key(_ id: Int64) -> VideoPlaybackKey { VideoPlaybackKey(messageID: id, attachment: attachment) }
     let ticket = cache.generation
     for id in 1...300 {
@@ -102,6 +115,8 @@ import UIKit
     XCTAssertEqual(budget.bytes, 0)
   }
 
+  // Готовим соседей по направлению прокрутки и оставляем место одному сзади. Сверяем точный набор
+  // прочитанных файлов, чтобы разворот мог быстро показать ближайший кадр.
   func testDirectionalPrefetchKeepsAnOppositeNeighborReadyForReversal() async throws {
     let h = try await RepositoryHarness.open()
     let media = MediaStore(store: h.store, studioOriginals: true)
@@ -151,6 +166,8 @@ import UIKit
     scene.close(); media.close(); try await h.close()
   }
 
+  // Выводим список из временного хранилища и сверяем порядок видимых строк и отсутствие кнопки
+  // повтора. Открытие должно обходиться сохранёнными сведениями.
   func testStudioDrawerReopensFromSavedChatListWithoutNetwork() async throws {
     let h = try await RepositoryHarness.open(), cache = NetworkStore(userID: 1)
     let profile = NetworkProfile(
@@ -202,11 +219,15 @@ import UIKit
     try await h.close()
   }
 
+  // Возвращаем путь к одному настоящему фото из проверочных материалов. Тот же исходник
+  // используется при всех сравнениях рисунка.
   private func source() throws -> URL {
     try XCTUnwrap(
       Bundle(for: RepositoryHarness.self).url(forResource: "fixtures", withExtension: nil)
     ).appendingPathComponent("real-media/backend-824d66cce0d64409ad4888a13792c7d4.jpg")
   }
+  // Подготавливаем исходное фото через обычное хранилище и переносим его данные во вложение.
+  // Размеры и поворот соответствуют тому же файлу.
   private func asset(_ media: MediaStore) async throws -> Attachment {
     let draft = try await media.stage(sourceURL: source(), mime: "image/jpeg")
     return Attachment(
@@ -214,6 +235,8 @@ import UIKit
       rawWidth: draft.rawWidth, rawHeight: draft.rawHeight, orientation: draft.orientation,
       durationMs: draft.durationMs, thumbnailKey: draft.thumbnailKey)
   }
+  // Ждём подготовленный рисунок нужного размера через обычный запрос. Проверка потом может
+  // сравнить его с показанным кадром.
   private func decode(_ media: MediaStore, _ attachment: Attachment, _ size: Int) async throws
     -> PreparedImage
   {
@@ -223,6 +246,9 @@ import UIKit
       }
     }
   }
+  // Заранее готовим соседнее фото, затем задерживаем оригинал при входе строки на экран.
+  // Маленький кадр остаётся до готовности, а возвращённая строка использует тот же готовый
+  // рисунок без кнопки передачи.
   func testHistoryPhotoWarmsOutsideViewportShowsPreviewAndReusesDecodedFrame() async throws {
     let h = try await RepositoryHarness.open(),
       media = MediaStore(store: h.store, studioOriginals: true)
@@ -268,12 +294,15 @@ import UIKit
       scene.close()
       media.close()
     }
-    /// Сразу возвращает удержание после измерения, чтобы сама проверка не продлевала срок жизни изображения.
+    // Читаем ширину видимого кадра и сразу отпускаем свою копию. По размеру различаем маленький и
+    // готовый файл, не удерживая его в проверке.
     func width() -> Int {
       let frame = scene.preview(1)
       defer { frame?.close() }
       return frame?.image?.width ?? 0
     }
+    // Повторяем короткую проверку до срока и сообщаем имя этапа при промахе. Это позволяет
+    // дождаться подготовки, которая завершается в фоне.
     func waitFor(_ description: String, _ condition: () -> Bool) async throws {
       let deadline = Date().addingTimeInterval(3)
       while !condition(), Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
@@ -333,6 +362,8 @@ import UIKit
     media.close()
     try await h.close()
   }
+  // Готовим фото до входа в чат и ждём первый кадр. Он должен содержать именно сохранённое
+  // изображение и живые фрагменты, а кнопка передачи не должна появиться.
   func testOpenHistoryCompletesWithTheActualInitialPhotoFrameNotOnlyMetadata() async throws {
     let h = try await RepositoryHarness.open(),
       media = MediaStore(store: h.store)
@@ -406,6 +437,9 @@ import UIKit
     await model.close()
     try await h.close()
   }
+  // Убираем кадры из памяти и снова открываем сохранённое место. До готовности должны
+  // восстановиться реальные фрагменты и местное фото с ограниченным размером, без лишнего
+  // проигрывателя.
   func testReopeningAfterMemoryPressureRebuildsTheActualViewportBeforeCompletion() async throws {
     let h = try await RepositoryHarness.open(),
       media = MediaStore(store: h.store), admission = MediaAdmission()
@@ -468,6 +502,8 @@ import UIKit
     }
     try await h.close()
   }
+  // Закрываем ленту, пока первый кадр ещё ждёт подготовки. Ожидающий вызов должен получить отмену
+  // и завершиться.
   func testClosingAnInitialViewportResolvesItsPendingWaiter() async throws {
     let host = ChatScrollHost()
     let pending = Task { try await host.prepareInitialFrame() }
@@ -483,7 +519,8 @@ import UIKit
       XCTFail("A closed viewport cannot complete presentation successfully")
     } catch { XCTAssertEqual(error as? RepoError, .cancelled) }
   }
-  /// Обычная очистка после закрытия второго владельца должна вернуть всю память.
+  // Возвращаемся к уже готовому снимку и сравниваем сам рисунок при первом показе. После обычной
+  // очистки расход должен стать нулевым.
   func testNavigationKeepsExactPixelsForTheFirstBindAndNormalPurgeStillFreesThem() async throws {
     let h = try await RepositoryHarness.open(),
       media = MediaStore(store: h.store)
@@ -515,6 +552,8 @@ import UIKit
     XCTAssertEqual(media.bytesUsed, 0)
     try await h.close()
   }
+  // Заполняем хранилище крупными и обычными изображениями. При переходе оригиналы уходят,
+  // недавние небольшие кадры укладываются в восемь мебибайт, а полная очистка освобождает их.
   func testNavigationEvictsOriginalsAndKeepsOnlyEightMiBOfRecentNormalPixels() async throws {
     let h = try await RepositoryHarness.open(),
       media = MediaStore(store: h.store)
@@ -542,6 +581,8 @@ import UIKit
     XCTAssertEqual(media.bytesUsed, 0)
     try await h.close()
   }
+  // Вкладываем переходы, прерываем их ошибкой и проверяем, что обычная очистка снова работает.
+  // Оповещение о памяти и закрытие нельзя отменить поздним выходом из перехода.
   func testNestedThrowingNavigationRestoresPurgeAndDoesNotResurrectMemoryWarningOrClosedStore()
     async throws
   {

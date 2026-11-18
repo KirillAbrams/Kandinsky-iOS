@@ -1,8 +1,13 @@
+// Проверяет обновление списка чатов по событиям и полным снимкам. Сценарии защищают порядок,
+// признаки генерации и пределы размера.
+
 import XCTest
 
 @testable import Kandinsky
 
 final class NetworkCatalogTests: XCTestCase {
+  // Применяет уведомление об удалённом чате без полной карточки и затем повторяет его. Первый
+  // ответ меняет список, второй не должен вызвать лишнее обновление.
   func testRetiredChatRefreshesVisibleDirectoryWithoutCatalogRows() async throws {
     let harness = try await RepositoryHarness.open()
     defer { Task { try? await harness.close() } }
@@ -22,6 +27,8 @@ final class NetworkCatalogTests: XCTestCase {
     XCTAssertEqual(remaining.map(\.id), [2])
   }
 
+  // Передаёт старый снимок после события завершения и сверяет сохранённый признак. Свежему снимку
+  // разрешено изменить его, чтобы защита от запоздания не блокировала новые сведения.
   func testLateDirectorySnapshotCannotRestartFinishedIndicator() async throws {
     let harness = try await RepositoryHarness.open()
     defer { Task { try? await harness.close() } }
@@ -50,10 +57,14 @@ final class NetworkCatalogTests: XCTestCase {
     XCTAssertTrue(fresh.generating)
   }
 
+  // Сравнивает пустое событие, начало, продолжение и завершение генерации. Проверяет, что список
+  // меняется только на переходах, видимых в его строке.
   func testProgressEventsDoNotReloadTheDirectory() async throws {
     let harness = try await RepositoryHarness.open()
     defer { Task { try? await harness.close() } }
     let cache = NetworkStore(userID: 1)
+    // Собирает условное событие для одной карточки с заданной позицией и признаком занятости.
+    // Одинаковое остальное состояние изолирует причину обновления списка.
     func event(_ cursor: Int, generating: Bool) throws -> Data {
       try JSONSerialization.data(withJSONObject: [
         "cursor": cursor,
@@ -79,10 +90,14 @@ final class NetworkCatalogTests: XCTestCase {
     XCTAssertEqual(flags, [false, true, false, true])
   }
 
+  // Событием поднимает чат в списке и перечитывает его через новый объект хранилища. После
+  // завершения повтор и старое событие не должны вернуть прежнюю занятость.
   func testDirectoryEventsPreserveActivityAndBusyStateAcrossReopen() async throws {
     let harness = try await RepositoryHarness.open()
     defer { Task { try? await harness.close() } }
     let cache = NetworkStore(userID: 1)
+    // Добавляет обычные поля к переданным карточкам, сохраняя заданные значения. Так тест меняет
+    // время и занятость, не заполняя заново всё описание.
     func packet(_ rows: [[String: Any]]) throws -> Data {
       try JSONSerialization.data(withJSONObject: [
         "chats": rows.map {
@@ -131,6 +146,8 @@ final class NetworkCatalogTests: XCTestCase {
     XCTAssertFalse(try XCTUnwrap(afterReplay.threads.first).generating)
   }
 
+  // Читает старую карточку без времени активности и занятости. Проверяет исходное название и
+  // значения по умолчанию для новых полей.
   func testOldDirectoryPayloadRemainsReadable() throws {
     let raw = Data(
       #"{"id":1,"title":"Старый чат","lastSeq":0,"unreadCount":0,"pinned":false,"archived":false}"#
@@ -141,8 +158,8 @@ final class NetworkCatalogTests: XCTestCase {
     XCTAssertFalse(thread.generating)
   }
 
-  /// Начальные поля добавляет отдельно, чтобы одним набором проверять первую загрузку и последующую
-  /// сверку.
+  // Создаёт список нужной длины, а для первого входа добавляет владельца, версию и позицию
+  // обмена. Один набор позволяет проверить начальное чтение и обновление.
   private func catalog(count: Int, initial: Bool) throws -> Data {
     let chats: [[String: Any]] = (1...count).map { index in
       ["id": index, "title": "Чат \(index)", "lastSeq": 0, "unreadCount": 0, "pinned": false]
@@ -157,6 +174,8 @@ final class NetworkCatalogTests: XCTestCase {
     return try JSONSerialization.data(withJSONObject: packet)
   }
 
+  // Пробует списки на прежней границе и до двухсот карточек. Сверяет все номера и записи базы,
+  // чтобы первая загрузка не обрезала список.
   func testBootstrapAcceptsCompleteServerCatalog() async throws {
     for count in [128, 129, 200] {
       let harness = try await RepositoryHarness.open()
@@ -174,6 +193,8 @@ final class NetworkCatalogTests: XCTestCase {
     }
   }
 
+  // Передаёт двести карточек при обычном обновлении и проверяет размер и границу продолжения.
+  // Иначе повторный запрос мог бы принимать меньший список, чем первый вход.
   func testRecentRefreshAcceptsCompleteServerCatalog() async throws {
     let harness = try await RepositoryHarness.open()
     defer { Task { try? await harness.close() } }
@@ -188,6 +209,9 @@ final class NetworkCatalogTests: XCTestCase {
     XCTAssertEqual(page.nextOffset, 200)
   }
 
+  // Передаёт список сверх предела и проверяет, что не осталось карточек и позиции обмена.
+  // Отдельно убеждается, что предел обычного массива сообщений не расширился вместе со списком
+  // чатов.
   func testOversizedCatalogRollsBackAndDefaultArrayBoundRemains() async throws {
     let harness = try await RepositoryHarness.open()
     defer { Task { try? await harness.close() } }

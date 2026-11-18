@@ -1,8 +1,13 @@
+// Наблюдаем готовность настоящих сообщений при движении видимой области. Проверка отдельно
+// считает загруженные строки, подготовленный текст и уже нарисованные слои.
+
 import XCTest
 import UIKit
 @testable import Kandinsky
 
 @MainActor final class VisibleContentDiagnosticsTests: XCTestCase {
+  // Ищем сохранённое поле объекта по имени и читаем его напрямую или из обёртки. Так диагностика
+  // использует внутренние счётчики без новых входов в обычном коде.
   private func field<T>(_ value: Any, _ name: String, as type: T.Type) -> T? {
     let item = Mirror(reflecting: value).children.first {
       $0.label == name || $0.label == "$__lazy_storage_$_" + name
@@ -10,7 +15,9 @@ import UIKit
     if let direct = item as? T { return direct }
     return item.flatMap { Mirror(reflecting: $0).children.first?.value as? T }
   }
-  // Читаем первые страницы рабочего чата через API. Номер чата зависит от аккаунта.
+  // Получаем номер «Длинной истории» для проверочного аккаунта и загружаем несколько страниц в
+  // отдельную местную базу. Прокручиваем с разными скоростями и проверяем, что нужные строки
+  // успевают появиться при ограниченном числе слоёв.
   func testActualHistoryReadinessDuringMovingViewport() async throws {
     let profile = try StudioTestServer.profile()
     let api = NetworkAPI(profile: profile)
@@ -63,6 +70,8 @@ import UIKit
     let retained = try XCTUnwrap(field(host, "scene", as: RetainedChatScene.self))
     let raster = try XCTUnwrap(field(retained, "rasterQueue", as: MediaDecodeQueue.self))
     var samples: [[String: Any]] = []
+    // Записываем видимые номера и отмечаем, что уже загружено, подготовлено и нарисовано на
+    // экране. Снимаем также длину очередей, чтобы отличить задержку данных от задержки рисования.
     func observe(_ phase: String, _ time: Double) {
       let viewport = host.bounds
       let ids = history.visible(

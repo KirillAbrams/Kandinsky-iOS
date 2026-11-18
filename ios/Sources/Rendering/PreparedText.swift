@@ -1,3 +1,7 @@
+// Подготовленная строка на айфоне хранит переносы текста, рамки вложений, время и части рисунка
+// сообщения. Расчёт идёт один раз на редакцию и ширину. Длинные сообщения делим на участки, чтобы
+// видимый кадр мог нарисовать только нужные строки и восстановить чтение по символу.
+
 import UIKit
 import CoreText
 struct TextLayoutKey: Hashable, Sendable {
@@ -7,6 +11,8 @@ struct TextLayoutKey: Hashable, Sendable {
   let fontSize: Int
   let scale: Int
   let roundDiameter: Int?
+  // Сохраняем номер и редакцию сообщения вместе с шириной, шрифтом и масштабом. У круглого видео
+  // есть отдельный диаметр. Так готовый рисунок не подставится к другой версии или размеру.
   init(
     messageID: MessageID, revision: Int, width: Int, fontSize: Int, scale: Int,
     roundDiameter: Int? = nil
@@ -31,6 +37,8 @@ struct TextBlock {
 }
 
 enum MessageTimestamp {
+  // Переводим время записи в местные часы и минуты. Всегда возвращаем по две цифры, чтобы ширина
+  // штампа менялась предсказуемо.
   static func string(for milliseconds: Int64, timeZone: TimeZone = .current) -> String {
     var calendar = Calendar(identifier: .gregorian)
     calendar.timeZone = timeZone
@@ -46,10 +54,15 @@ enum MessageTimestamp {
 }
 
 enum MessageBubbleBackground {
+  // Для непрозрачного фона, выровненного по точкам экрана, заполняем середину прямоугольниками и
+  // сглаживаем только углы. При прозрачности или дробном сдвиге сохраняем цельный контур, чтобы
+  // цвет и край выглядели правильно.
   static func fill(_ rect: CGRect, radius: CGFloat, color: CGColor, in context: CGContext) {
     context.setFillColor(color)
     let path = CGPath(roundedRect: rect, cornerWidth: radius, cornerHeight: radius, transform: nil)
     let transform = context.ctm, device = rect.applying(transform)
+    // Проверяем, что преобразованная координата практически целая. Малые ошибки вычисления
+    // допустимы, а заметная дробь требует полного рисунка контура.
     func integral(_ value: CGFloat) -> Bool {
       value.isFinite && abs(value - value.rounded()) < 0.000001
     }
@@ -65,8 +78,8 @@ enum MessageBubbleBackground {
       context.fillPath()
       return
     }
-    // Keep the original curve and its device-pixel phase. Only the four corners
-    // need a coverage mask; a flat interior does not need path antialiasing.
+    // Сохраняем исходную кривую и её положение относительно точек экрана. Сглаживание
+    // нужно только четырём углам, середина уже совпадает с сеткой.
     context.fill(
       CGRect(
         x: rect.minX, y: rect.minY + radius, width: rect.width, height: rect.height - 2 * radius))
@@ -90,11 +103,10 @@ enum MessageBubbleBackground {
   }
 }
 
-/// Bounded, justified rows. Geometry is prepared once with the message, never
-/// during scrolling. The picker uses the same engine with two columns.
 enum MediaMosaic {
-  /// Для четырёх результатов по отдельному признаку оставляет две равные строки, чтобы сохранить сетку
-  /// ожидания.
+  // Раскладываем от двух до десяти вложений в ряды, подбирая размеры по их пропорциям. Четыре
+  // результата могут сохранить сетку два на два и после появления файлов. Края округляем по
+  // масштабу экрана, чтобы между рядами не появлялись щели.
   static func layout(
     sizes: [CGSize], width: CGFloat, spacing: CGFloat = 1, maxColumns: Int = 3, scale: CGFloat = 2,
     balancedFour: Bool = false
@@ -104,6 +116,8 @@ enum MediaMosaic {
       columns = max(2, min(3, maxColumns))
     let target = width * 4 / 3
     var best: [Int] = [], cost = CGFloat.greatestFiniteMagnitude
+    // Считаем высоты выбранных рядов и сравниваем с целевым размером альбома. Слишком тонкие ряды
+    // и убывание числа картинок делают вариант менее подходящим.
     func score(_ rows: [Int]) {
       var index = 0, heights: [CGFloat] = []
       for count in rows {
@@ -120,6 +134,8 @@ enum MediaMosaic {
         cost = value
       }
     }
+    // Перебираем допустимое число ячеек в очередном ряду до конца списка. Ограничение глубины не
+    // даёт маленькому альбому разрастись в длинную колонку.
     func visit(_ remaining: Int, _ rows: [Int]) {
       if remaining == 0 {
         score(rows)
@@ -159,6 +175,7 @@ enum MediaMosaic {
 enum KandinskyMediaAction: String {
   case save, share, expand
 
+  // Возвращаем русское название действия для кнопок и озвучивания.
   var title: String {
     switch self {
     case .save: return "Сохранить"
@@ -177,6 +194,8 @@ enum KandinskyMediaAction: String {
       })
   }()
 
+  // Берём готовый значок действия, пропуская выход за область рисунка. Переворачиваем локальную
+  // вертикаль, чтобы изображение не стало вверх ногами.
   func draw(in rect: CGRect, context: CGContext) {
     guard let icon = Self.icons[self], context.boundingBoxOfClipPath.intersects(rect) else {
       return
@@ -202,6 +221,8 @@ final class PreparedText: @unchecked Sendable {
     cache.countLimit = 120
     return cache
   }()
+  // Переиспользуем готовую надпись для одинакового времени входящих строк. При плотной переписке
+  // несколько соседних сообщений могут делить один рисунок.
   private static func incomingTime(_ text: String) -> CTLine {
     let key = text as NSString
     if let line = incomingTimes.object(forKey: key) { return line }
@@ -245,33 +266,45 @@ final class PreparedText: @unchecked Sendable {
   private var captionStampInline = false
   private let mediaInfo: CTLine
   private let emojiFontSize: CGFloat?
+  // Под подписью оставляем прямой нижний край обычного вложения. Видеокружочек и наклейка
+  // сохраняют собственную форму.
   var mediaBottomSquare: Bool {
     mediaRect != nil && message.kind != .round && message.kind != .sticker && !text.isEmpty
   }
+  // Одиночное входящее фото или видео получает специальные места для времени и длительности.
   private var isStudioResult: Bool {
     message.direction == .incoming && message.attachments.count == 1
       && (message.kind == .photo || message.kind == .video)
   }
+  // Результат, наклейка и обычное вложение используют свои скругления рамки.
   var mediaCornerRadius: CGFloat { isStudioResult ? 12 : message.kind == .sticker ? 0 : 15 }
   let mediaActions: [(action: KandinskyMediaAction, frame: CGRect)]
   private static let actionIconSize: CGFloat = 13.5
+  // Вычисляем маленькую рамку значка внутри большой кнопки. Та же рамка нужна для экономной
+  // подготовки отдельного слоя рисунка.
   private static func actionIconFrame(_ button: CGRect) -> CGRect {
     CGRect(
       x: button.midX - actionIconSize / 2, y: button.midY - 6 - actionIconSize / 2,
       width: actionIconSize, height: actionIconSize)
   }
-  /// Plain text keeps its existing native message owner; only sharp ink needs a bitmap.
+  // Короткое обычное сообщение может использовать системную подложку. В рисунке тогда достаточно
+  // оставить чёткий текст.
   var nativeTextBubbleColor: CGColor? {
     generationCard == nil && !isStudioPrompt && message.kind == .text && emojiFontSize == nil
       && blocks.count == 1
       ? (message.direction == .outgoing ? KandinskyPalette.outgoing : UIColor.white).cgColor : nil
   }
+  // Считаем высоту по концу последнего фрагмента. Если строк ещё нет, используем начальную
+  // высоту.
   var height: CGFloat { blocks.last.map { $0.offsetY + $0.height } ?? 44 }
+  // Выбираем текст сообщения, подпись под файлом или вид вложения без рисунка.
   var text: String {
     message.kind == .text
       ? message.text : (mediaRect == nil ? Self.label(message) : message.caption)
   }
-  /// Длинный текст делит на небольшие блоки, чтобы при прокрутке рисовать только нужную часть.
+  // Измеряем текст, время, поля, вложения и карточку генерации. Сохраняем начало каждой строки
+  // для возврата к абзацу и режем длинный рисунок небольшими участками. Останавливаем дальнейший
+  // перенос при отмене, чтобы напрасно не занимать работника.
   init(message: Message, key: TextLayoutKey, isCancelled: @escaping () -> Bool = { false }) {
     let prompt = message.kind == .text && message.direction == .outgoing
     let emoji = message.kind == .text && !prompt ? Self.largeEmojiFontSize(message.text) : nil
@@ -509,6 +542,8 @@ final class PreparedText: @unchecked Sendable {
       studioPromptBubble = Self.promptBubble(width: width, height: last.offsetY + last.height)
     }
   }
+  // Строим единый контур исходящего запроса с хвостом у нижнего края. Все части длинного текста
+  // рисуют один контур со своим вертикальным смещением.
   private static func promptBubble(width: CGFloat, height: CGFloat) -> CGPath {
     let bodyRight = width - 6
     let path = CGMutablePath()
@@ -530,7 +565,8 @@ final class PreparedText: @unchecked Sendable {
     path.closeSubpath()
     return path
   }
-  /// Возвращает только геометрию, чтобы подготовка текста не зависела от загрузки самого файла.
+  // Берём известные пропорции с учётом поворота и ограничения по виду файла. Геометрия готова до
+  // чтения самого изображения, поэтому загрузка не должна менять высоту строки.
   private static func mediaSize(_ message: Message, bound: CGFloat) -> CGSize? {
     guard let a = message.attachments.first else { return nil }
     if message.kind == .round {
@@ -554,6 +590,8 @@ final class PreparedText: @unchecked Sendable {
     return CGSize(
       width: min(maxW, max(min(170, maxW), rw * scale)), height: min(maxH, max(74, rh * scale)))
   }
+  // Даём понятное текстовое имя вложению без визуального блока и добавляем его подпись. Это
+  // оставляет содержание доступным даже без картинки.
   private static func label(_ m: Message) -> String {
 
     let title: [MessageKind: String] = [
@@ -562,6 +600,8 @@ final class PreparedText: @unchecked Sendable {
     ]
     return (title[m.kind] ?? "") + (m.caption.isEmpty ? "" : "\n" + m.caption)
   }
+  // Крупно рисуем сообщение только из цветных значков, пропуская пробелы и переносы. Размер
+  // уменьшается при большем числе знаков в строке или строк в сообщении.
   private static func largeEmojiFontSize(_ text: String) -> CGFloat? {
     guard !text.isEmpty else { return nil }
     var count = 0, maxLine = 0, line = 0, lines = 1
@@ -587,11 +627,15 @@ final class PreparedText: @unchecked Sendable {
       multipliers: [CGFloat] = [1, 0.84, 0.69, 0.53, 0.46, 0.38, 0.32, 0.27, 0.24]
     return floor(94 * (length <= multipliers.count ? multipliers[length - 1] : 0.21))
   }
+  // Находим ближайшую видимую строку и возвращаем её начало вместе с расстоянием до точки чтения.
+  // После нового переноса по этим данным можно найти тот же абзац.
   func lineAnchor(y: CGFloat) -> (Int, CGFloat)? {
     guard let i = tops.indices.first(where: { tops[$0] + lineHeights[$0] > y }) ?? tops.indices.last
     else { return nil }
     return (starts[i], tops[i] - y)
   }
+  // Ищем строку сохранённого смещения по порядку начал. Двоичный поиск не перебирает весь длинный
+  // текст при восстановлении места.
   func y(forUTF16 value: Int) -> CGFloat? {
     guard !starts.isEmpty else { return nil }
     var lo = 0, hi = starts.count
@@ -606,6 +650,8 @@ final class PreparedText: @unchecked Sendable {
     let text: String
     let frame: CGRect
   }
+  // Находим попавшие в заданную полосу строки и возвращаем ограниченное число рамок с текстом.
+  // Для карточки ошибки используем её собственную область подписи.
   func accessibleLines(from lower: CGFloat, to upper: CGFloat, limit: Int) -> [AccessibleLine] {
     guard limit > 0 else { return [] }
     if let card = generationCard {
@@ -641,7 +687,9 @@ final class PreparedText: @unchecked Sendable {
     }
     return result
   }
-  /// На время рисования удерживает защиту данных, чтобы закрытие объекта не освободило используемые строки.
+  // Рисуем только указанную часть сообщения под защитой от одновременного освобождения.
+  // Выравниваем строки по направлению письма. Время рисуем на последней части, чтобы не повторять
+  // его на каждом фрагменте.
   func draw(part: Int, in context: CGContext, drawsBackground: Bool = true) {
     lock.lock()
     defer { lock.unlock() }
@@ -717,10 +765,14 @@ final class PreparedText: @unchecked Sendable {
       context.restoreGState()
     }
   }
+  // Определяем, нужны ли метки прямо на вложении. Время рядом с обычной подписью рисует текстовая
+  // часть.
   var hasMediaStamp: Bool {
     guard generationCard == nil, mediaRect != nil else { return false }
     return [.video, .gif, .round, .sticker].contains(message.kind) || text.isEmpty
   }
+  // Вычисляем небольшие рамки длительности видео и времени сообщения. Длительность идёт сверху, а
+  // время без подписи снизу, чтобы метки не закрыли центр.
   private func studioMediaBadges(in rect: CGRect) -> [(CTLine, CGRect)] {
     let badgeHeight: CGFloat = 17.2
     var badges: [(CTLine, CGRect)] = []
@@ -741,12 +793,15 @@ final class PreparedText: @unchecked Sendable {
     }
     return badges
   }
+  // Возвращаем рамки меток отдельно от рисунка файла, чтобы подготовить только занятые участки.
   var mediaStampRegions: [CGRect] {
     lock.lock()
     defer { lock.unlock() }
     guard !closed, hasMediaStamp, let rect = mediaRect else { return [] }
     if isStudioResult { return studioMediaBadges(in: rect).map(\.1) }
     var regions: [CGRect] = []
+    // Добавляем рамку обычной метки по ширине текста и полям. Эти границы ограничивают область
+    // будущего рисунка.
     func pill(_ line: CTLine, x: CGFloat, y: CGFloat) {
       regions.append(
         CGRect(
@@ -774,11 +829,14 @@ final class PreparedText: @unchecked Sendable {
     }
     return regions
   }
+  // Добавляем к рамкам меток область значков действий, если они есть.
   var mediaOverlayRegions: [CGRect] {
     let stamps = mediaStampRegions
     guard let first = mediaActions.first, let last = mediaActions.last else { return stamps }
     return stamps + [Self.actionIconFrame(first.frame).union(Self.actionIconFrame(last.frame))]
   }
+  // Рисуем небольшие подписи поверх фото или ролика и значки действий под результатом. У ручного
+  // проигрывателя скрываем лишние значки, которые уже есть у его собственных кнопок.
   func drawMediaStamp(in context: CGContext, manual: Bool = false) {
     lock.lock()
     defer { lock.unlock() }
@@ -803,6 +861,8 @@ final class PreparedText: @unchecked Sendable {
       }
       return
     }
+    // Рисуем полупрозрачный фон вокруг штампа и ставим текст с полями. Это сохраняет читаемость и
+    // на светлом, и на тёмном кадре.
     func pill(_ line: CTLine, x: CGFloat, y: CGFloat) {
       let w = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil)),
         box = CGRect(x: x, y: y, width: w + 10, height: 18)
@@ -857,6 +917,8 @@ final class PreparedText: @unchecked Sendable {
         y: message.kind == .round ? rect.maxY - 22 : rect.maxY - 24)
     }
   }
+  // Однократно освобождаем строки и измерения под той же защитой, что использует рисование.
+  // Поздний вызов больше не может обратиться к освобождённым фрагментам.
   func close() {
     lock.lock()
     defer { lock.unlock() }

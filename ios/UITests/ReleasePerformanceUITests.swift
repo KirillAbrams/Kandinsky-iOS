@@ -1,6 +1,11 @@
+// Проверяем открытие и прокрутку длинной истории через обычные жесты и собираем показания
+// времени, памяти и процессора.
+
 import XCTest
 
 final class ReleasePerformanceUITests: XCTestCase {
+  // Открываем историю из меню и ждём появления поля ввода. Так следующий жест попадает в чат,
+  // который закончил открываться.
   private func openLongHistory(_ app: XCUIApplication) throws {
     let menu = app.buttons["chat.back"]
     XCTAssertTrue(menu.waitForExistence(timeout: 15))
@@ -11,6 +16,8 @@ final class ReleasePerformanceUITests: XCTestCase {
     XCTAssertTrue(app.textViews["composer.input"].waitForExistence(timeout: 12))
   }
 
+  // Запускаем приложение со сбором показаний и открываем длинную историю. При отсутствии
+  // сохранённого входа проверка пропускается без создания аккаунта.
   private func start() throws -> XCUIApplication {
     continueAfterFailure = false
     let app = XCUIApplication()
@@ -23,6 +30,8 @@ final class ReleasePerformanceUITests: XCTestCase {
     return app
   }
 
+  // В ограниченное время повторяем быстрые жесты по готовым строкам или в сторону старых страниц.
+  // Снимаем время, память, затраты процессора и поддерживаемые признаки задержек прокрутки.
   private func measureScrolling(_ app: XCUIApplication, olderPages: Bool) {
     let options = XCTMeasureOptions()
     options.iterationCount = 1
@@ -50,13 +59,19 @@ final class ReleasePerformanceUITests: XCTestCase {
     XCTAssertTrue(app.textViews["composer.input"].exists)
   }
 
+  // Прокручиваем длинную историю назад и вперёд и сверяем смену набора видимых строк. Наличие
+  // формы ввода после жестов показывает, что экран остался открыт.
   func testLongHistoryScrollsInBothDirections() throws {
     let app = try start()
     let rows = app.descendants(matching: .any).matching(
       NSPredicate(format: "identifier BEGINSWITH 'message.' OR identifier BEGINSWITH 'generation.slot.' OR identifier BEGINSWITH 'media.image.'"))
+    // Собираем номера только тех сообщений и вложений, с которыми сейчас можно взаимодействовать.
+    // Скрытые элементы не должны выдавать себя за прокрученные строки.
     func visibleRows() -> Set<String> {
       Set(rows.allElementsBoundByIndex.filter { $0.isHittable }.map(\.identifier))
     }
+    // Ждём появления хотя бы одного нового видимого номера. Пустой список и прежний состав не
+    // подтверждают перемещение.
     func waitForRows(differentFrom previous: Set<String>) -> Set<String> {
       var current = Set<String>()
       let changed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
@@ -76,14 +91,20 @@ final class ReleasePerformanceUITests: XCTestCase {
     XCTAssertTrue(app.textViews["composer.input"].exists)
   }
 
+  // Собираем показания при коротких жестах туда и обратно по уже подготовленной истории.
+  // Отдельный сценарий даёт замер без постоянного ухода за пределы готовых строк.
   func testReadyRowsNativeMetrics() throws {
     measureScrolling(try start(), olderPages: false)
   }
 
+  // Прокручиваем в сторону более старых страниц с большим размахом. Замер включает работу,
+  // которая появляется при выходе за пределы готовых строк.
   func testNewPagesNativeMetrics() throws {
     measureScrolling(try start(), olderPages: true)
   }
 
+  // Двадцать раз открываем длинную историю из меню подряд. Повторяем путь в одном запущенном
+  // приложении, чтобы заметить сбой при переиспользовании экрана.
   func testTwentyWarmOpens() throws {
     let app = try start()
     for _ in 0..<20 { try openLongHistory(app) }

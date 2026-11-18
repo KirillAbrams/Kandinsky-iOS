@@ -1,7 +1,12 @@
+// Проверяем фон, прозрачную шапку и форму ввода чата. Отдельно проверяем, что новый рисунок
+// создаётся только при нужных изменениях.
+
 import XCTest
 import UIKit
 @testable import Kandinsky
 @MainActor final class GlassRenderingTests: XCTestCase {
+  // Несколько раз раскладываем элементы с одинаковой шириной, затем меняем состояние и размер.
+  // Проверка ловит как лишнюю перерисовку шапки, так и пропущенное обновление.
   func testRepeatedLayoutKeepsHeaderDrawingUntilStatusOrWidthChanges() throws {
     let chrome = ConversationChrome(chatID: 3, onBack: {})
     chrome.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
@@ -32,6 +37,8 @@ import UIKit
     XCTAssertTrue(header.layer.needsDisplay())
   }
 
+  // Вводим текст и убеждаемся, что модель получила черновик, а шапка не запросила новый рисунок.
+  // Иначе лишняя работа повторялась бы при каждом знаке.
   func testTypingUpdatesDraftWithoutRedrawingHeader() async throws {
     let harness = try await RepositoryHarness.open()
     let state = ConversationState(repository: harness.repo)
@@ -52,6 +59,8 @@ import UIKit
     await state.close()
     try await harness.close()
   }
+  // Проверяем, что повторная раскладка и состояние участника не сбрасывают рисунок обоев. При
+  // изменении условий их рисования поверхность должна обновиться.
   func testUnchangedLayoutAndPeerStatusDoNotInvalidateWallpaper() async throws {
     let scene = try XCTUnwrap(
       UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
@@ -92,6 +101,8 @@ import UIKit
       chrome.layer.needsDisplay(),
       "A real size change must still repaint the wallpaper and empty-state geometry")
   }
+  // Читаем пиксели снимка под прозрачной шапкой. Проверяем полную непрозрачность и достаточный
+  // уровень зелёного, чтобы заметить тёмный провал фона.
   func testChatWallpaperRemainsOpaqueAndLightBehindGlass() throws {
     let view = ConversationChrome(chatID: 3, onBack: {})
     view.frame = CGRect(x: 0, y: 0, width: 394, height: 852)
@@ -113,6 +124,8 @@ import UIKit
     XCTAssertEqual(rgba[p + 3], 255, "Wallpaper must stay opaque after material tint")
     XCTAssertGreaterThan(rgba[p + 1], 100, "Green wallpaper remains bright, not transparent black")
   }
+  // Меняем цвет под системной прозрачной поверхностью и проверяем, что она подхватывает новый
+  // рисунок. Тёмный элемент поверх неё должен сохранить чёткий цвет.
   func testSystemBackdropChangesLiveAndForegroundStaysSharp() async throws {
     let scene = try XCTUnwrap(
       UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
@@ -140,6 +153,8 @@ import UIKit
     foreground.backgroundColor = .black
     root.view.addSubview(foreground)
     root.view.layoutIfNeeded()
+    // Снимаем окно после обновления экрана в масштабе один к одному. Точки измерения тогда
+    // совпадают с заданными координатами.
     func snapshot() -> UIImage {
       let f = UIGraphicsImageRendererFormat()
       f.scale = 1
@@ -147,6 +162,8 @@ import UIKit
         window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
       }
     }
+    // Читаем четыре цветовых значения в выбранной точке изображения. Это позволяет отличить
+    // смешанный фон от чёткого переднего элемента.
     func pixel(_ image: UIImage, _ x: Int, _ y: Int) throws -> [UInt8] {
       let cg = try XCTUnwrap(image.cgImage)
       var bytes = [UInt8](repeating: 0, count: cg.width * cg.height * 4)
@@ -179,10 +196,14 @@ import UIKit
       Int(changed[1]), Int(filtered[1]) + 30, "System glass must resample changing content")
   }
 
+  // Раскладываем экран обычного размера и сверяем высоту поля и кнопок, порядок и границы.
+  // Проверка замечает кнопку, которую стало трудно нажать или которая ушла за край.
   func testStandardSizeKeepsEditorAndButtonsWithinReach() throws {
     let chrome = ConversationChrome(chatID: 3, onBack: {})
     chrome.frame = CGRect(x: 0, y: 0, width: 394, height: 852)
     chrome.layoutIfNeeded()
+    // Находим прямоугольник элемента по его постоянной метке. Если элемент исчез из раскладки,
+    // проверка останавливается сразу.
     func frame(_ name: String) throws -> CGRect {
       try XCTUnwrap(chrome.subviews.first { $0.accessibilityIdentifier == name }).frame
     }

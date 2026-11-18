@@ -1,6 +1,11 @@
+// Проверяет обычные действия в студии айфона через экран. Здесь открывают историю, выбирают
+// исходники, меняют настройки и проверяют состояние задания в отдельном окружении.
+
 import XCTest
 
 final class AccountEntryUITests: XCTestCase {
+  // Находит подготовленную медиаленту, открывая список при необходимости. Если истории нет в
+  // текущем входе, пропускает зависящий от неё сценарий.
   private func openFixtureHistory(_ app: XCUIApplication) throws {
     let row = app.buttons.matching(
       NSPredicate(
@@ -17,6 +22,8 @@ final class AccountEntryUITests: XCTestCase {
     XCTAssertTrue(app.textViews["composer.input"].waitForExistence(timeout: 20))
   }
 
+  // Ждёт изменения подписи оставшегося времени. Неподвижная заставка с прежним временем так не
+  // пройдёт проверку проигрывания.
   private func assertPreviewIsPlaying(_ app: XCUIApplication) {
     let remaining = app.staticTexts["studio.upload.remaining"]
     XCTAssertTrue(remaining.waitForExistence(timeout: 8))
@@ -29,6 +36,8 @@ final class AccountEntryUITests: XCTestCase {
     XCTAssertEqual(XCTWaiter.wait(for: [advanced], timeout: 9), .completed)
   }
 
+  // Открывает новую историю, подставляет пример и сверяет команды выбора файлов и камеры. Так
+  // можно заметить пропажу действия при перестройке экрана.
   func testNewStudioHasReferenceActionsAndSamplePrompt() throws {
     continueAfterFailure = false
     let app = XCUIApplication()
@@ -66,7 +75,8 @@ final class AccountEntryUITests: XCTestCase {
     add(attachments)
   }
 
-  /// В новом разговоре повторно выбирает уже загруженное фото без повторного выбора в системной галерее.
+  // Открывает просмотр недавнего ролика и выбирает уже загруженный снимок в новой истории.
+  // Проверяет отправку с исходником и отменяет созданное задание.
   func testRecentUploadsReusePhotoAndPreviewVideo() throws {
     continueAfterFailure = false
     let app = XCUIApplication()
@@ -110,6 +120,8 @@ final class AccountEntryUITests: XCTestCase {
     XCTAssertTrue(app.staticTexts["Генерация отменена"].waitForExistence(timeout: 15))
   }
 
+  // Выбирает и убирает недавний снимок, затем запускает, разворачивает и закрывает видео.
+  // Проверяет, что просмотр возвращает к вводу без отправки задания.
   func testRecentPhotoAndVideoCanBeOpenedWithoutSendingARequest() throws {
     continueAfterFailure = false
     let app = XCUIApplication()
@@ -121,6 +133,8 @@ final class AccountEntryUITests: XCTestCase {
     let expand = app.buttons["studio.upload.expand"]
     let collapse = app.buttons["studio.upload.collapse"]
 
+    // Открывает список вложений и нажимает нужный недавний файл. При необходимости прокручивает
+    // список, чтобы нажать на видимую строку.
     func chooseRecent(_ title: String) {
       plus.tap()
       let choice = app.buttons[title].firstMatch
@@ -144,6 +158,8 @@ final class AccountEntryUITests: XCTestCase {
     app.buttons["Плотная медиалента"].firstMatch.tap()
   }
 
+  // Нажимает в центр рамки миниатюры системной галереи. Её описание доступно для чтения, но не
+  // всегда само принимает нажатие.
   private func tapPickerThumbnail(_ thumbnail: XCUIElement, in app: XCUIApplication) {
     // Системная галерея публикует описание кадра отдельным элементом без действия нажатия.
     let frame = thumbnail.frame
@@ -151,6 +167,8 @@ final class AccountEntryUITests: XCTestCase {
     origin.withOffset(CGVector(dx: frame.midX, dy: frame.midY)).tap()
   }
 
+  // Открывает пустую историю и выбирает подготовленный снимок в системной галерее. Ждёт метку
+  // исходника, чтобы следующая проверка работала с уже принятым файлом.
   private func selectStudioPhoto(_ app: XCUIApplication) throws {
     try openFixtureHistory(app)
     app.buttons["chat.compose"].tap()
@@ -170,6 +188,8 @@ final class AccountEntryUITests: XCTestCase {
     XCTAssertTrue(app.buttons["studio.reference.remove"].waitForExistence(timeout: 20))
   }
 
+  // Выбирает снимок и ждёт, когда он появится в недавних. Убеждается, что загрузка исходника сама
+  // не создала задание.
   func testSelectedPhotoReachesRecentUploadsBeforeSendingPrompt() throws {
     continueAfterFailure = false
     let app = XCUIApplication()
@@ -192,6 +212,8 @@ final class AccountEntryUITests: XCTestCase {
       ).firstMatch.exists)
   }
 
+  // Нажимает на описание вложения и проверяет, что источник остался. Удаляет его отдельной
+  // кнопкой и убеждается, что форма вернулась к пустой заготовке.
   func testPhotoLabelKeepsSourceUntilDelete() throws {
     continueAfterFailure = false
     let app = XCUIApplication()
@@ -211,6 +233,8 @@ final class AccountEntryUITests: XCTestCase {
     XCTAssertTrue(app.buttons["chat.welcome"].exists)
   }
 
+  // Выбирает снимок и отправляет его без текста. После принятия запроса пустая заготовка и
+  // исходник должны исчезнуть из поля ввода.
   func testSelectedHeicSubmitsWithoutCaption() throws {
     continueAfterFailure = false
     let app = XCUIApplication()
@@ -234,6 +258,8 @@ final class AccountEntryUITests: XCTestCase {
     }
   }
 
+  // Выбирает снимок, добавляет отличимый текст, отправляет запрос и отменяет его. Этот путь
+  // проверяет принятие исходника через видимые действия.
   func testSelectedHeicSubmitsVideoLiteSource() throws {
     continueAfterFailure = false
     let app = XCUIApplication()
@@ -258,6 +284,8 @@ final class AccountEntryUITests: XCTestCase {
     XCTAssertTrue(app.staticTexts["Генерация отменена"].waitForExistence(timeout: 15))
   }
 
+  // Выбирает видео, открывает его приглушённый просмотр и разворачивает. После возврата проверяет
+  // просмотр и закрывает его, чтобы вновь увидеть поле ввода.
   func testSelectedVideoOpensMutedStudioPreview() throws {
     continueAfterFailure = false
     let app = XCUIApplication()
@@ -306,6 +334,8 @@ final class AccountEntryUITests: XCTestCase {
     XCTAssertFalse(expand.exists)
   }
 
+  // Создаёт первый запрос, ждёт его в очереди, отменяет и повторяет. Сверяет привязку действия к
+  // прежней строке и появление нового запуска.
   func testFirstStudioPromptReachesTheQueue() throws {
     continueAfterFailure = false
     let app = XCUIApplication()
@@ -362,6 +392,8 @@ final class AccountEntryUITests: XCTestCase {
     XCTAssertFalse(cancel.waitForExistence(timeout: 2))
   }
 
+  // Сверяет размеры кнопки отправки, панели и новой истории. После закрытия панели отправка снова
+  // должна быть доступна.
   func testStudioSendTargetAndDrawerLayout() throws {
     continueAfterFailure = false
     let app = XCUIApplication()
@@ -388,7 +420,8 @@ final class AccountEntryUITests: XCTestCase {
     XCTAssertTrue(send.waitForExistence(timeout: 6))
   }
 
-  /// После закрытия списка прежнее сообщение должно вернуться с допустимым отклонением положения.
+  // Запоминает положение видимой фразы, сверяет поля поиска и архива в боковой панели и возвращается
+  // в чат. Повторный показ сохраняет высоту той же строки.
   func testStudioDrawerReturnsToTheSameHistoryPosition() throws {
     let app = XCUIApplication()
     app.launch()
@@ -421,7 +454,8 @@ final class AccountEntryUITests: XCTestCase {
     XCTAssertEqual(returned.frame.minY, position, accuracy: 1)
   }
 
-  /// Неудачная попытка не должна создавать прикреплённое фото, итоговый экран сохраняется снимком.
+  // На симуляторе с недоступной камерой проверяет понятную подсказку и сохранение ввода. Ошибка
+  // не должна добавить несуществующий исходник или очистить черновик.
   func testUnavailableCameraKeepsStudioDraftAndShowsCameraMessage() throws {
     continueAfterFailure = false
     let app = XCUIApplication()
@@ -450,8 +484,8 @@ final class AccountEntryUITests: XCTestCase {
     captureAdvancedPanel(app, name: "Native Kandinsky — camera unavailable")
   }
 
-  /// Сам вызов не читает серверные поля задания, поэтому это проверка ввода и сохранения настроек на
-  /// экране.
+  // Вводит дополнительный текст, число и силу следования описанию, затем открывает настройки
+  // снова. Сверяет сохранённые поля на экране и отменяет отправленное задание.
   func testImageAdvancedFieldsReachTheOriginalJob() throws {
     continueAfterFailure = false
     let app = XCUIApplication()
@@ -509,6 +543,8 @@ final class AccountEntryUITests: XCTestCase {
     XCTAssertTrue(app.staticTexts["Генерация отменена"].waitForExistence(timeout: 12))
   }
 
+  // Делает снимок открытых настроек и сохраняет его в отчёте проверки. При сбое можно увидеть,
+  // какой шаг успел отобразиться.
   private func captureAdvancedPanel(_ app: XCUIApplication, name: String) {
     let attachment = XCTAttachment(screenshot: app.screenshot())
     attachment.name = name
@@ -516,6 +552,8 @@ final class AccountEntryUITests: XCTestCase {
     add(attachment)
   }
 
+  // Сравнивает доступные поля фото и видео, размеры вариантов и сохранение введённого числа.
+  // Проверяет, что поля одной модели не переходят в другую.
   func testGenerationPanelsReflectServerCapabilities() throws {
     continueAfterFailure = false
     let app = XCUIApplication()
@@ -581,6 +619,8 @@ final class AccountEntryUITests: XCTestCase {
     XCTAssertTrue(settings.waitForExistence(timeout: 6))
   }
 
+  // Открывает подготовленную медиаленту и вызывает системную передачу и сохранение файла. Ждёт
+  // нужные системные окна, чтобы отличить рабочую команду от нажатия без результата.
   func testExistingMediaHistory() throws {
     let app = XCUIApplication()
     app.launch()

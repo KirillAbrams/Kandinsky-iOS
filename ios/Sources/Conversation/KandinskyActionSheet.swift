@@ -1,3 +1,6 @@
+// Показывает команды выбранной строки на прокручиваемой панели айфона. Выбранное действие
+// начинается после того, как панель уйдёт с экрана.
+
 import UIKit
 
 struct KandinskySheetAction {
@@ -12,6 +15,8 @@ struct KandinskySheetAction {
   private let panel = NativeGlassPanel(frame: .zero)
   private let stack = UIStackView()
   private let scroll = UIScrollView()
+  // Принимает заголовок и команды, задаёт особый вид показа поверх текущего экрана. Предыдущее
+  // окно остаётся под панелью.
   init(title: String? = nil, items: [KandinskySheetAction]) {
     heading = title
     self.items = items
@@ -20,8 +25,11 @@ struct KandinskySheetAction {
     modalPresentationStyle = .overFullScreen
     modalTransitionStyle = .crossDissolve
   }
+  // Запрещает создание без переданного списка действий. Загрузка только разметки оставила бы
+  // панель без рабочих команд.
   required init?(coder: NSCoder) { fatalError() }
-  /// Выбранное действие выполняет после закрытия панели, чтобы следующее окно не открывалось поверх неё.
+  // Собирает кнопки, отмену и фон, переводит доступность на панель. Любое действие начинается
+  // после закрытия, чтобы следующая панель не наложилась на первую.
   override func viewDidLoad() {
     super.viewDidLoad()
     view.backgroundColor = UIColor.black.withAlphaComponent(0.18)
@@ -72,6 +80,8 @@ struct KandinskySheetAction {
     }
     UIAccessibility.post(notification: .screenChanged, argument: stack.arrangedSubviews.first)
   }
+  // Ограничивает ширину и высоту доступным местом и даёт прокрутке полный размер списка команд.
+  // Длинный список не обрежется у края экрана.
   override func viewDidLayoutSubviews() {
     super.viewDidLayoutSubviews()
     let width = min(360, view.bounds.width - 24)
@@ -88,6 +98,7 @@ struct KandinskySheetAction {
     stack.frame = CGRect(x: 0, y: 0, width: scroll.bounds.width, height: contentHeight)
     scroll.contentSize = stack.bounds.size
   }
+  // Закрывает панель системным жестом доступности, не исполняя ни одной команды.
   override func accessibilityPerformEscape() -> Bool {
     dismiss(animated: true)
     return true
@@ -95,6 +106,8 @@ struct KandinskySheetAction {
 }
 
 private final class KandinskySheetButton: UIButton {
+  // Выделяет отдельные места под значок и текст кнопки. При изменении ширины подпись не наложится
+  // на изображение.
   override func layoutSubviews() {
     super.layoutSubviews()
     imageView?.contentMode = .scaleAspectFit

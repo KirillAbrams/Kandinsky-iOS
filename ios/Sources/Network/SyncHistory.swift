@@ -1,3 +1,6 @@
+// Подгружает старые сообщения рядом с местом чтения и отдельно сверяет последние сообщения
+// открытого чата. Разделение позволяет загружать нужную порцию без скачивания всей истории.
+
 import Foundation
 
 struct HistorySyncState {
@@ -8,6 +11,9 @@ struct HistorySyncState {
 }
 
 extension NetworkSync {
+  // Запоминает открытый чат и читает, сколько строк осталось перед видимой. У края местной
+  // истории просит сервер о предыдущей порции. Повтор после ошибки откладывается, чтобы прокрутка
+  // не создала поток запросов.
   func viewport(chat: Int64, anchor: ReadingAnchor) {
     history.currentChat = chat
     guard let localID = anchor.messageID, !history.loadingHistory.contains(chat),
@@ -45,11 +51,16 @@ extension NetworkSync {
       } catch { history.nextHistoryRetry[chat] = Date.timeIntervalSinceReferenceDate + 5 }
     }
   }
+  // Запоминает номер видимого чата и сверяет историю при смене. Повторное появление того же
+  // номера не должно запускать ещё одну загрузку.
   func visibleChat(_ chat: Int64?) {
     let changed = history.currentChat != chat
     history.currentChat = chat
     if changed, let chat { refreshVisibleHistory(chat) }
   }
+  // Запрашивает свежую порцию для открытого чата и записывает её перед показом. Помнит время
+  // успешной сверки для последних чатов, чтобы быстрые переходы не перечитывали один и тот же
+  // список.
   func refreshVisibleHistory(_ chat: Int64) {
     let now = ProcessInfo.processInfo.systemUptime
     if resumed, let last = history.visibleHistoryRefreshes[chat], now - last < 90 { return }

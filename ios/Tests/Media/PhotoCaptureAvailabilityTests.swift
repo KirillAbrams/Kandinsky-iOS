@@ -1,8 +1,14 @@
+// Проверка камеры на устройстве без доступного заднего объектива. Она помогает поймать ошибку,
+// при которой неудачная попытка снять фото оставляет камеру занятой.
+
 import XCTest
 import UIKit
 import AVFoundation
 @testable import Kandinsky
 @MainActor final class PhotoCaptureAvailabilityTests: XCTestCase {
+  // Запрашиваем снимок там, где система не видит заднюю камеру. Ждём сообщение о недоступности и
+  // проверяем, что место для съёмки осталось свободным. С настоящей камерой этот сценарий
+  // пропускается.
   func testMissingSimulatorCameraIsReportedWithoutTakingCaptureLease() async throws {
     guard AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) == nil
     else {

@@ -1,3 +1,7 @@
+// Просмотрщик на айфоне показывает одно вложение отдельно или внутри галереи. Он отдаёт выбранной
+// странице крупное фото, а соседним оставляет уменьшенное изображение либо сохранённый кадр
+// видео. Отмена загрузки, масштабирование и выход из просмотра проходят через этот экран.
+
 import UIKit
 
 @MainActor
@@ -23,6 +27,8 @@ final class PhotoViewerController: UIViewController, UIScrollViewDelegate,
   private var controlsVisible = true
   private var appeared = false
 
+  // Принимаем файл и уже готовое изображение, если его успела показать лента. Отдельное окно
+  // сразу активно, а страница внутри галереи дождётся выбора перед загрузкой оригинала.
   init(
     attachment: Attachment, media: MediaStore, preview: PreparedImage? = nil, caption: String = "",
     embedded: Bool = false, playbackKey: VideoPlaybackKey? = nil
@@ -39,8 +45,13 @@ final class PhotoViewerController: UIViewController, UIScrollViewDelegate,
     super.init(nibName: nil, bundle: nil)
     modalPresentationStyle = .fullScreen
   }
+  // Создание из файла разметки запрещено. Просмотрщику нужны конкретное вложение и доступ к
+  // хранилищу при создании.
   required init?(coder: NSCoder) { fatalError() }
+  // Используем светлые системные подписи, чтобы они читались на чёрном фоне.
   override var preferredStatusBarStyle: UIStatusBarStyle { .lightContent }
+  // Создаём прокрутку, слой рисунка, кнопки и жесты. Ответ слоя может сохранить уменьшенный кадр
+  // или сообщить галерее, что он готов. Поздний ответ для закрытой страницы сразу отбрасываем.
   override func loadView() {
     view = UIView()
     view.backgroundColor = .black
@@ -122,6 +133,8 @@ final class PhotoViewerController: UIViewController, UIScrollViewDelegate,
     for control in [back, progress, retry] { view.addSubview(control) }
     back.isHidden = embedded
   }
+  // Вписываем изображение с учётом поворота файла, сохраняя масштаб и точку под центром при смене
+  // размера окна. Кнопки и подпись располагаем отдельно от масштабируемого слоя.
   override func viewDidLayoutSubviews() {
     super.viewDidLayoutSubviews()
     let size = view.bounds.size
@@ -183,6 +196,9 @@ final class PhotoViewerController: UIViewController, UIScrollViewDelegate,
       x: 0, y: captionView.frame.minY - 24, width: size.width, height: captionHeight + 40)
     CATransaction.commit()
   }
+  // Привязываем файл к прямоугольнику показа и выбираем размер подготовленного изображения.
+  // Соседу оставляем уменьшенный кадр, а крупный рисунок берём после готовности оригинала и
+  // сохранения меньшего.
   private func bindImage() {
     guard !resourcesClosed else { return }
     originalBound = active && hasOriginal && (standbyPreview != nil || slot.loadFailed)
@@ -196,6 +212,8 @@ final class PhotoViewerController: UIViewController, UIScrollViewDelegate,
       slot.seed(preview)
     }
   }
+  // Сохраняем уменьшенный кадр из хранилища или текущего слоя на случай ухода со страницы. Кадр
+  // больше допустимого размера закрываем, иначе фоновые страницы удерживали бы крупные картинки.
   private func retainStandbyPreview() {
     let limit = embedded ? 384 : 1024
     let candidate =
@@ -209,12 +227,16 @@ final class PhotoViewerController: UIViewController, UIScrollViewDelegate,
     standbyPreview?.close()
     standbyPreview = candidate
   }
+  // Добавляем симметричные пустые поля, если рисунок уже или ниже видимой области. Маленькое фото
+  // остаётся по центру при любом масштабе.
   private func centerImage() {
     let x = max(0, (scroll.bounds.width - scroll.contentSize.width) / 2),
       y = max(0, (scroll.bounds.height - scroll.contentSize.height) / 2)
     let insets = UIEdgeInsets(top: y, left: x, bottom: y, right: x)
     if scroll.contentInset != insets { scroll.contentInset = insets }
   }
+  // Передаём касание галерее для вложенной страницы. В отдельном окне переключаем собственные
+  // кнопку выхода, подпись и затемнение вместе.
   @objc private func toggleControls() {
     if embedded {
       onToggleControls?()
@@ -225,6 +247,8 @@ final class PhotoViewerController: UIViewController, UIScrollViewDelegate,
     captionView.isHidden = captionText.isEmpty || !controlsVisible
     captionShade.isHidden = captionView.isHidden
   }
+  // Двойное касание увеличивает выбранное место фотографии, а повтор возвращает общий вид. Для
+  // встроенного видео используется его предел масштаба.
   @objc private func doubleTapped(_ gesture: UITapGestureRecognizer) {
     if scroll.zoomScale > 1.05 {
       scroll.setZoomScale(1, animated: true)
@@ -236,12 +260,16 @@ final class PhotoViewerController: UIViewController, UIScrollViewDelegate,
       width: scroll.bounds.width / scale, height: scroll.bounds.height / scale)
     scroll.zoom(to: target, animated: true)
   }
+  // Оставляем касания внутри подписи самой подписи. Тогда выделение или прокрутка текста не
+  // начнут закрывать просмотр.
   func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch)
     -> Bool
   {
     guard let target = touch.view else { return true }
     return !target.isDescendant(of: captionView)
   }
+  // Разрешаем вертикальное закрытие только при обычном масштабе и перевесе движения по вертикали.
+  // Увеличенное фото должно двигаться внутри страницы, а горизонталь нужна для свайпа галереи.
   func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
     guard let pan = gestureRecognizer as? UIPanGestureRecognizer, scroll.zoomScale <= 1.01 else {
       return false
@@ -249,6 +277,8 @@ final class PhotoViewerController: UIViewController, UIScrollViewDelegate,
     let velocity = pan.velocity(in: view)
     return abs(velocity.y) > abs(velocity.x)
   }
+  // Двигаем изображение за пальцем и закрываем при достаточном расстоянии или скорости. Короткий
+  // или отменённый жест возвращает картинку на место.
   @objc private func dragged(_ gesture: UIPanGestureRecognizer) {
     let dy = gesture.translation(in: view).y
     switch gesture.state {
@@ -263,12 +293,16 @@ final class PhotoViewerController: UIViewController, UIScrollViewDelegate,
     default: break
     }
   }
+  // Плавно убираем смещение изображения после незавершённого закрытия. Фон снова заполняет экран
+  // чёрным.
   private func restorePosition() {
     UIView.animate(withDuration: 0.18) {
       self.scroll.transform = .identity
       self.view.backgroundColor = .black
     }
   }
+  // У вложенной страницы просим закрыть всю галерею. Отдельное окно отменяет свою загрузку и
+  // закрывается само, не позволяя повторному жесту начать второй переход.
   private func finish() {
     guard !dismissing else { return }
     if embedded {
@@ -279,18 +313,30 @@ final class PhotoViewerController: UIViewController, UIScrollViewDelegate,
     cancelDownload(showRetry: false)
     dismiss(animated: true)
   }
+  // Запоминаем появление и начинаем загрузку, если страница активна и оригинал ещё нужен. Ручную
+  // отмену уважаем, а общая фотография генерации получает кадр через свой слой.
   override func viewDidAppear(_ animated: Bool) {
     super.viewDidAppear(animated)
     appeared = true
     if active, !sharedStudioPhoto { if !hasOriginal && !downloadPausedByUser { loadOriginal() } }
   }
+  // Возвращаем удержанную копию текущего кадра. Галерея может положить её под видео, пока
+  // проигрыватель готовит первый кадр.
   func retainedPreview() -> PreparedImage? { slot.preview() }
+  // Просим слой достать последний кадр нужного видео по его ключу. Это сохраняет узнаваемое
+  // изображение после снятия проигрывателя.
   func showLastVideoFrame() { slot.showSavedPlaybackFrame(for: playbackKey) }
+  // Галерея учитывает увеличение перед передачей жеста соседней странице.
   var pageIsZoomed: Bool { scroll.zoomScale > 1.01 }
+  // Готовим кнопки страницы и отмечаем загрузку как остановленную вручную. При повторном открытии
+  // человек увидит кнопку повтора вместо немедленной передачи.
   func pauseOriginal() {
     loadViewIfNeeded()
     cancelDownload(showRetry: true)
   }
+  // При выборе страницы разрешаем крупный кадр или показываем доступный повтор. При уходе
+  // отменяем загрузку и оставляем уменьшенное изображение, чтобы следующая страница могла занять
+  // память.
   func setPageActive(_ value: Bool) {
     guard !resourcesClosed, active != value else { return }
     active = value
@@ -317,6 +363,9 @@ final class PhotoViewerController: UIViewController, UIScrollViewDelegate,
       bindImage()
     }
   }
+  // Для общей фотографии обновляем её местный слой. В остальных случаях просим хранилище
+  // подготовить оригинал, показываем ход передачи и принимаем только ответ с текущим номером
+  // попытки.
   private func loadOriginal() {
     guard active, !resourcesClosed else { return }
     downloadPausedByUser = false
@@ -355,6 +404,8 @@ final class PhotoViewerController: UIViewController, UIScrollViewDelegate,
       }
     }
   }
+  // Останавливаем чтение и меняем номер попытки, чтобы поздний ответ не изменил картинку. Только
+  // ручная отмена ставит отметку для кнопки повтора.
   private func cancelDownload(showRetry: Bool) {
     generation += 1
     download?.cancel()
@@ -366,15 +417,23 @@ final class PhotoViewerController: UIViewController, UIScrollViewDelegate,
     progress.update(progress: nil, visible: false)
     retry.isHidden = !showRetry
   }
+  // Возвращаем системе слой самого изображения. Кнопки, ход загрузки и подпись остаются своего
+  // размера при увеличении фото.
   func viewForZooming(in scrollView: UIScrollView) -> UIView? { imageHost }
+  // Поправляем отступы по новому размеру и сообщаем галерее, увеличена ли фотография. Галерея по
+  // этому признаку отдаёт движение пальца самой странице.
   func scrollViewDidZoom(_ scrollView: UIScrollView) {
     centerImage()
     onZoomChanged?(scrollView.zoomScale > 1.01)
   }
+  // После исчезновения закрываем подготовку файла и рисунок. Ресурсы прежнего просмотра не
+  // остаются привязаны к невидимому окну.
   override func viewDidDisappear(_ animated: Bool) {
     super.viewDidDisappear(animated)
     closePage()
   }
+  // Один раз прекращаем работу и возвращаем удержанные кадры хранилищу. У самостоятельного окна
+  // дополнительно освобождаем простаивающие картинки и возвращаем управление ленте.
   func closePage() {
     guard !resourcesClosed else { return }
     resourcesClosed = true

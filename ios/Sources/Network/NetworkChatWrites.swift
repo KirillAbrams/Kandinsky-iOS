@@ -1,6 +1,11 @@
+// Обновляет карточки чатов и строит список недавних из базы телефона. Сведения о работе и времени
+// хранятся отдельно от страниц истории.
+
 import Foundation
 
 extension NetworkStore {
+  // Записывает список недавних и дополнительные страницы известных чатов. Если за время запроса
+  // пришли события, сохраняет новые сведения о работе и времени, чтобы старый ответ их не затёр.
   func mergeStudioDirectorySnapshot(
     _ db: SQLiteConnection, recent: Data, states: [Data] = [], startedAtCursor: Int64
   ) throws -> [MessageDelta] {
@@ -13,6 +18,8 @@ extension NetworkStore {
     return changes
   }
 
+  // Меняет только признак архива в сохранённых правилах чата. При совпадении не пишет ничего, а
+  // другие признаки сохраняет.
   private func studioArchive(_ db: SQLiteConnection, chat: Int64, archived: Bool) throws {
     var flags = try ChatServerState.state(db, chat: chat)
     guard (flags["archived"] as? Bool ?? false) != archived else { return }
@@ -23,7 +30,8 @@ extension NetworkStore {
       [.integer(chat), .text(String(decoding: bytes, as: UTF8.self))])
   }
 
-  // Скрываем старую историю на устройстве, чтобы задержавшаяся страница не вернула удалённый чат.
+  // Скрывает удалённый чат и ставит границу очистки после всей известной истории. Возвращает
+  // снятые строки для экрана. Задержавшиеся сообщения больше не могут вернуть этот чат.
   func retireStudioThread(_ db: SQLiteConnection, chat: Int64) throws -> [Int64]? {
     guard try db.scalar("SELECT count(*) FROM chats WHERE id=?", [.integer(chat)]) > 0 else {
       return nil
@@ -37,8 +45,8 @@ extension NetworkStore {
     return try ChatServerState.applyState(db, chat: chat, value: flags)
   }
 
-  // Старая сводка может прийти после новых сообщений. При обновлении счётчика учитываем сообщения за её границей.
-  // Старые базы могут хранить границу уже прочитанной истории.
+  // Читает прежнюю отметку о прочитанном из базы и проверяет, что она неотрицательная. Она нужна,
+  // чтобы запоздалая карточка не прибавила уже прочитанные строки.
   private func legacyReadPosition(_ db: SQLiteConnection, chat: Int64) throws -> Int64 {
     let value =
       try db.rows("SELECT value FROM net_state WHERE key=?", [.text("ownRead:\(chat)")]).first?[
@@ -47,6 +55,9 @@ extension NetworkStore {
     return through
   }
 
+  // Принимает карточки допустимой версии, добавляет к счётчику новые чужие сообщения за границей
+  // сводки и применяет состояние чата. Собирает номера изменённых и убранных сообщений для
+  // экрана.
   func mergeChatRows(
     _ db: SQLiteConnection, json: WireObject, touched: inout [Int64: Set<Int64>], limit: Int = 128,
     preserveDirectoryMetadata: Bool = false
@@ -119,7 +130,9 @@ extension NetworkStore {
     return removed
   }
 
-  // Сводка не зависит от загруженной страницы сообщений и переживает закрытие приложения.
+  // Сохраняет время активности и признак генерации независимо от загруженной истории. При
+  // запоздалом ответе сохраняет уже известную сводку, иначе список мог бы потерять свежий
+  // порядок.
   func rememberStudioDirectory(
     _ db: SQLiteConnection, chat: WireObject, preserveKnown: Bool = false
   ) throws {
@@ -139,6 +152,8 @@ extension NetworkStore {
       db, key, String(decoding: bytes, as: UTF8.self))
   }
 
+  // Разбирает сетевую порцию и сохраняет её вместе со списком недавних, когда он запрошен. Экран
+  // получает итоговые изменения одной записи.
   func mergeChats(
     _ db: SQLiteConnection, data: Data, studioRecent: Bool = false,
     preserveDirectoryMetadata: Bool = false
@@ -158,6 +173,8 @@ extension NetworkStore {
     }
   }
 
+  // Запоминает время получения и порядок номеров недавних чатов. При одинаковой активности это
+  // позволяет сохранить порядок, выданный сервером.
   func rememberStudioRecent(_ db: SQLiteConnection, json: WireObject) throws {
     let ids = try json.array("chats", limit: StudioRecentPage.catalogLimit).map {
       try WireObject($0).int("id")
@@ -166,10 +183,14 @@ extension NetworkStore {
     try state(db, "studioRecentOrder", ([receivedAt] + ids).map(String.init).joined(separator: ","))
   }
 
+  // Читает номера всех известных сетевых чатов в устойчивом порядке. По ним можно запросить
+  // состояние записей, оставшихся за пределами первой страницы.
   func studioChatIDs(_ db: SQLiteConnection) throws -> [Int64] {
     try db.rows("SELECT chatID FROM net_chats ORDER BY chatID").map { $0["chatID"]!.int }
   }
 
+  // Собирает карточки с признаками состояния и исключает скрытые и архивные чаты. Сортирует по
+  // закреплению, активности и сохранённому порядку. Полная порция даёт номер следующей страницы.
   func studioRecent(_ db: SQLiteConnection) throws -> StudioRecentPage {
     let saved = try db.rows("SELECT value FROM net_state WHERE key='studioRecentOrder'").first?[
       "value"]?.string
@@ -219,6 +240,8 @@ extension NetworkStore {
       nextOffset: catalogCount == StudioRecentPage.catalogLimit ? catalogCount : nil)
   }
 
+  // Сравнивает номера чатов из событий с местными записями, когда сервер не приложил карточки.
+  // Сообщает о пропуске, чтобы сначала получить недостающий чат.
   func hasUnknownChats(_ db: SQLiteConnection, data: Data) throws -> Bool {
     let packet = try WireObject(data: data)
     if packet.value["chats"] is [Any] { return false }

@@ -1,3 +1,6 @@
+// Показывает в ленте ролик без звука и закрывает его при удалении вложения. При уходе за экран
+// сохраняет место и кадр, чтобы возвращение не начиналось с пустоты.
+
 import UIKit
 import AVFoundation
 import CoreImage
@@ -24,6 +27,8 @@ import CoreImage
   var active: Bool { !closed && !restoring && layer.player != nil && layer.isReadyForDisplay }
   var presented: Bool { active && visible }
   var isPlaying: Bool { presented && player.rate > 0 }
+  // Возобновляет готовое видео при появлении и скрывает его с паузой при уходе. Ошибочный ролик
+  // закрывается, чтобы повтор можно было сделать при новом появлении.
   func setVisible(_ value: Bool) {
     guard !closed, visible != value else { return }
     visible = value
@@ -37,6 +42,8 @@ import CoreImage
     }
   }
   /// Подключает закрытие при потере действительности соответствующего медиа в хранилище.
+  // Создаёт тихий проигрыватель, скрытый слой и подписку на отзыв медиа. При удалении источника
+  // просмотр должен закрыться вместе с ним.
   init(store: MediaStore) {
     self.store = store
     player.isMuted = true
@@ -49,6 +56,9 @@ import CoreImage
   }
   /// Один владелец относится к одному исходнику, поэтому при замене файла закрывается для создания
   /// следующего.
+  // Меняет рамку без анимации и открывает файл только для первой привязки. Получает
+  // ограниченное место проигрывания и проверяет номер попытки после чтения, чтобы поздний
+  // источник не прикрепился к закрытому кадру.
   func bind(
     _ attachment: Attachment, frame: CGRect, circular: Bool, cornerRadius: CGFloat,
     bottomSquare: Bool, studioAlbum: Bool = false, playbackKey: VideoPlaybackKey? = nil,
@@ -110,6 +120,8 @@ import CoreImage
       }
     }
   }
+  // Готовит видео, слушает готовность и конец, восстанавливает сохранённое время до показа.
+  // Продолжает повтор только пока ролик виден.
   private func install(_ source: MediaPlaybackSource, asset: AVAsset, ticket: Int) {
     self.source = source
     let item = AVPlayerItem(asset: asset)
@@ -180,17 +192,22 @@ import CoreImage
       if visible { player.play() }
     }
   }
-  // При открытии просмотра передаём видимый кадр, а не заставку под проигрывателем.
+  // Запоминает видимый кадр сейчас и выдаёт его для перехода в просмотр. Экран просмотра может
+  // начинать с того же изображения.
   func snapshotFrame() -> PreparedImage? {
     rememberPlayback(at: player.currentTime(), immediate: true)
     return playbackKey.flatMap { store.videoPlayback.frame($0) }
   }
+  // Считывает время до паузы и сохраняет его после остановки. После паузы проигрыватель мог бы
+  // уже дать время соседнего опорного кадра.
   private func pauseAndRememberPlayback() {
     // После паузы системный проигрыватель может вернуть время соседнего ключевого кадра.
     let time = player.currentTime()
     player.pause()
     rememberPlayback(at: time)
   }
+  // Записывает время и берёт правильно повёрнутые пиксели с доступного вывода. Готовит кадр сразу
+  // для перехода или в фоне для паузы, сохраняя ограничение памяти.
   private func rememberPlayback(at time: CMTime, immediate: Bool = false) {
     guard let playbackKey, !restoring, player.currentItem != nil else { return }
     store.videoPlayback.rememberPosition(time.seconds, key: playbackKey, generation: cacheGeneration)
@@ -218,6 +235,8 @@ import CoreImage
         }, render: render)
     }
   }
+  // Отмечает отказ и освобождает системную работу. Видимую строку оставляет в покое до нового
+  // появления, иначе она непрерывно повторяла бы сбой.
   private func failPreview() {
     failed = true
     generation += 1
@@ -226,6 +245,8 @@ import CoreImage
     // ухода и возврата, а обновление экрана не создаст непрерывных повторов.
     if visible { onChange?() } else { close() }
   }
+  // Отменяет подготовку и наблюдение, убирает слой и закрывает источник и право проигрывания.
+  // Старый сеанс больше не выдаёт кадры.
   private func retireNative() {
     task?.cancel()
     task = nil
@@ -247,6 +268,8 @@ import CoreImage
     lifetime?.retire()
     lifetime = nil
   }
+  // Перед освобождением сохраняет место видимого видео, а для уже скрытого оставляет последнее
+  // время паузы. Снимает подписку и слой, чтобы ролик больше не держал экран.
   func close() {
     guard !closed else { return }
     // У невидимого ролика позиция уже снята при паузе. При освобождении сохраняем

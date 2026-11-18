@@ -1,12 +1,19 @@
+// Проверяет выбор модели, параметров генерации и недавних файлов на экране айфона. Использует
+// условные возможности службы и отдельное окно для показа.
+
 import UIKit
 import XCTest
 @testable import Kandinsky
 
 @MainActor final class StudioGenerationSheetTests: XCTestCase {
+  // Возвращает корневой элемент и всех его потомков. Поиск не зависит от вложенности панели,
+  // когда её оформление меняется.
   private func views(in view: UIView) -> [UIView] {
     [view] + view.subviews.flatMap { views(in: $0) }
   }
 
+  // Ищет элемент заданного вида по имени доступности. При отсутствии выдаёт ошибку с конкретным
+  // именем.
   private func component<T: UIView>(
     _ type: T.Type, in sheet: StudioGenerationSheet, identifier: String
   ) throws -> T {
@@ -15,12 +22,16 @@ import XCTest
     }, identifier)
   }
 
+  // Находит кнопку по видимому названию или подписи для озвучивания. Это позволяет одинаково
+  // проверить текстовые и составные кнопки.
   private func button(_ title: String, in sheet: StudioGenerationSheet) throws -> UIButton {
     try XCTUnwrap(views(in: sheet.view).compactMap { $0 as? UIButton }.first {
       $0.currentTitle == title || $0.accessibilityLabel == title
     }, title)
   }
 
+  // На время сценария открывает отдельное окно, а затем закрывает панель и возвращает прежний
+  // фокус. Иначе проверка могла бы оставить чужое окно активным.
   private func withPresentationHost(
     _ run: (UIViewController) async throws -> Void
   ) async throws {
@@ -38,6 +49,8 @@ import XCTest
     try await run(host)
   }
 
+  // Меняет формат, размер, качество, длительность и количество, затем проверяет ползунок, предел
+  // текста и слишком большое число. После исправления сверяет все переданные настройки.
   func testAdvancedSettingsKeepSelectedOptionsAndRejectAnOverflowingSeed() throws {
     let sheet = StudioGenerationSheet(options: KandinskyOptions(
       model: "video", aspect: "5:3", duration_seconds: 3, count: 2))
@@ -91,6 +104,8 @@ import XCTest
     )])
   }
 
+  // Передаёт прежние значения модели с урезанным набором возможностей. Проверяет скрытые поля и
+  // замену недоступных вариантов, чтобы они не ушли в запрос.
   func testRemovedCapabilitiesDiscardStaleOptions() throws {
     let sheet = StudioGenerationSheet(options: KandinskyOptions(
       model: "video_sr", aspect: "3:5", duration_seconds: 3, quality: "draft", resolution: "compact",
@@ -115,6 +130,8 @@ import XCTest
     )])
   }
 
+  // Проверяет, что закрытая панель не добавляет файлы, а открытая показывает первые пять. Нажатие
+  // возвращает именно выбранный файл после ухода панели.
   func testRecentUploadsAreLimitedAndSelectionSurvivesDismissingTheSheet() async throws {
     try await withPresentationHost { host in
       let sheet = StudioGenerationSheet(options: KandinskyOptions())
@@ -140,6 +157,8 @@ import XCTest
     }
   }
 
+  // Проверяет пустой список и подсказку, затем открывает список с двумя моделями. Сверяет
+  // выделение, описание и результат после закрытия окна.
   func testModelCatalogueShowsFailureAndReturnsTheChosenModelAfterDismissal() async throws {
     let empty = StudioGenerationSheet(options: KandinskyOptions())
     empty.showModels([]) { _ in XCTFail("Пустой список не должен предлагать модель") }

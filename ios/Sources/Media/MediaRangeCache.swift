@@ -1,3 +1,6 @@
+// Хранит части видео на диске и выдаёт проигрывателю только нужные байты. После повторного
+// открытия готовые части используются снова, а полный файл появляется после проверки.
+
 import Foundation
 import CryptoKit
 
@@ -11,6 +14,8 @@ final class MediaRangeCache: @unchecked Sendable {
   private let io = NSLock(), state = NSLock()
   private var closed = false, active: MediaCancellation?
   private var memory: [Int: Data] = [:], order: [Int] = []
+  // Проверяет номер, длину файла и путь без ссылок. Создаёт отдельную папку для частей, чтобы
+  // неверное имя не направило запись в чужое место.
   init(
     root: URL, blob: String, length: Int64, original: URL,
     onPromoted: (@Sendable () -> Void)? = nil,
@@ -32,6 +37,9 @@ final class MediaRangeCache: @unchecked Sendable {
   }
   /// Скачанные части остаются на диске. Если снова открыть видео, плеер сможет использовать их без повторной
   /// загрузки.
+  // Читает из полного файла, памяти или сохранённой части, а недостающую загружает и проверяет.
+  // Возвращает ограниченную порцию байтов и оставляет только две части в памяти, чтобы
+  // проигрыватель не держал там весь ролик.
   func read(offset: Int64, count: Int, cancellation: MediaCancellation) throws -> Data {
     guard offset >= 0, count >= 0 else { throw MediaError.corrupt }
     if offset >= length || count == 0 { return Data() }
@@ -98,6 +106,8 @@ final class MediaRangeCache: @unchecked Sendable {
   }
   /// Если номер файла содержит полный хеш, сверяем его перед публикацией. Повреждённые части придётся
   /// скачать заново.
+  // Проверяет наличие и длину всех частей, собирает временный файл и при наличии сверяет
+  // контрольную сумму. Только после этого переносит оригинал на постоянный путь и удаляет части.
   private func promoteIfComplete() throws {
     let count = Int((length + Int64(Self.chunkSize) - 1) / Int64(Self.chunkSize)),
       fm = FileManager.default
@@ -151,6 +161,8 @@ final class MediaRangeCache: @unchecked Sendable {
     }
   }
   /// Текущий файл может ещё читать плеер. Поэтому при нехватке места удаляем части других файлов.
+  // Считает занятое место частями и начинает уборку со старых папок других файлов. Текущие части
+  // оставляет, чтобы проигрыватель мог продолжить чтение.
   private func pruneInactive() {
     let fm = FileManager.default, parent = directory.deletingLastPathComponent()
     let dirs =
@@ -172,6 +184,8 @@ final class MediaRangeCache: @unchecked Sendable {
       if (try? fm.removeItem(at: dir)) != nil { total -= size }
     }
   }
+  // Помечает источник закрытым и отменяет активную загрузку. Если чтение ещё держит блокировку,
+  // оно само освободит память при выходе. Так закрытие не ждёт сетевой ответ.
   func close() {
     state.lock()
     closed = true
@@ -185,5 +199,7 @@ final class MediaRangeCache: @unchecked Sendable {
       io.unlock()
     }
   }
+  // Закрывает источник при освобождении владельца. Незавершённая передача не должна пережить
+  // объект, который получал её результат.
   deinit { close() }
 }

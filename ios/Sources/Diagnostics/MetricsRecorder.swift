@@ -1,3 +1,6 @@
+// Собирает замеры времени и движения ленты на айфоне с ограничением памяти. Пишет время вызовов и
+// положение слоёв, а число кадров на экране подтверждают отдельные замеры.
+
 import Foundation
 import QuartzCore
 import UIKit
@@ -16,13 +19,19 @@ struct NumericStatistics: Codable {
   private var samples: [String: Samples] = [:]
   private(set) var peaks: [String: Int] = [:]
   private let capacity: Int
+  // Задаёт число сохраняемых значений в каждой серии. Минимум одно место защищает запись от
+  // попытки обновить пустой буфер.
   init(capacity: Int = 8192) { self.capacity = max(1, capacity) }
-  /// Монотонные часы продолжают отсчёт, даже если пользователь поменял время на телефоне.
+  // Берёт отметку часов, которые идут независимо от настроек даты. Перевод времени телефона не
+  // исказит длину операции.
   func begin() -> Double { CACurrentMediaTime() }
+  // Вычитает начальное время и записывает длительность под заданным именем. Все такие интервалы
+  // попадают в отчёт в миллисекундах.
   func end(_ name: String, _ token: Double) {
     record(name, milliseconds: (CACurrentMediaTime() - token) * 1000)
   }
-  /// Храним только последние замеры. Общее число и максимум считаем с начала работы.
+  // Принимает только конечную неотрицательную длительность и ограничивает число серий. Последние
+  // значения заменяют старые, а общий счёт и максимум сохраняются.
   func record(_ name: String, milliseconds: Double) {
     guard milliseconds.isFinite, milliseconds >= 0, samples[name] != nil || samples.count < 8 else {
       return
@@ -38,15 +47,19 @@ struct NumericStatistics: Codable {
     }
     samples[name] = series
   }
-  /// Ограничиваем число имён показателей, чтобы диагностика не расходовала всё больше памяти.
+  // Обновляет наибольшее значение показателя и ограничивает число имён. Диагностика не
+  // накапливает бесконечное число счётчиков.
   func peak(_ name: String, _ value: Int) {
     guard peaks[name] != nil || peaks.count < 12 else { return }
     peaks[name] = max(peaks[name] ?? 0, value)
   }
-  /// Медиану и процентили считаем по последним замерам, максимум берём за всё время.
+  // Сортирует сохранённые замеры для середины и верхних долей, а счёт и максимум берёт за всё
+  // время. Так видно, сколько замеров ещё осталось в памяти.
   func statistics(_ name: String) -> NumericStatistics? {
     guard let series = samples[name], !series.values.isEmpty else { return nil }
     let sorted = series.values.sorted()
+    // Выбирает позицию заданной доли в отсортированном ряду с округлением вверх. Крайний замер
+    // при малом числе значений тоже участвует.
     func percentile(_ fraction: Double) -> Double {
       sorted[max(0, Int(ceil(Double(sorted.count) * fraction)) - 1)]
     }
@@ -55,6 +68,8 @@ struct NumericStatistics: Codable {
       p99: percentile(0.99),
       maximum: series.maximum)
   }
+  // Возвращает последние замеры в порядке записи, учитывая место замены старых значений. В отчёте
+  // конец ряда не поменяется местами с началом.
   func rawSamples() -> [String: [Double]] {
     samples.mapValues { series in
       series.values.count < capacity
@@ -62,6 +77,7 @@ struct NumericStatistics: Codable {
         : Array(series.values.dropFirst(series.next)) + Array(series.values.prefix(series.next))
     }
   }
+  // Собирает сводки всех записанных длительностей. Пустому имени не создаётся выдуманный замер.
   func snapshot() -> [String: NumericStatistics] {
     samples.keys.reduce(into: [:]) { $0[$1] = statistics($1) }
   }
@@ -73,7 +89,8 @@ struct NumericStatistics: Codable {
   private static let writer = DispatchQueue(label: "Kandinsky.NumericMetrics")
   private static var writing = false
   private static var pending: Data?
-  /// Пока файл записывается, оставляем только самый свежий отчёт.
+  // Готовит отчёт с замерами сцены и частотой, доступной экрану. Пока файл пишется, хранит только
+  // последний ожидающий отчёт, чтобы очередь не росла.
   static func export() {
     guard enabled, let output else { return }
     struct Report: Codable {
@@ -94,6 +111,8 @@ struct NumericStatistics: Codable {
     guard !writing else { return }
     writeNext(output)
   }
+  // Передаёт очередной отчёт на фоновую запись и заменяет файл целиком. После завершения снова
+  // проверяет ожидание, чтобы свежий отчёт не потерялся.
   private static func writeNext(_ url: URL) {
     guard let data = pending else {
       writing = false
@@ -111,15 +130,16 @@ struct NumericStatistics: Codable {
 }
 @MainActor private final class FrameTick: NSObject {
   weak var owner: ScrollFrameProbe?
-  /// Таймер удерживает своего получателя. Слабая ссылка позволяет освободить наблюдатель прокрутки.
+  // Передаёт сигнал экрана наблюдателю по слабой ссылке. Системный таймер не удерживает ушедший
+  // объект прокрутки.
   @objc func tick(_ link: CADisplayLink) { owner?.tick(link) }
 }
 @MainActor final class ScrollFrameProbe {
   private var link: CADisplayLink?
   private let proxy = FrameTick()
   private var previous: Double?
-  /// Замер показывает интервал между вызовами главного потока. По нему нельзя узнать, сколько кадров увидел
-  /// человек.
+  // Создаёт наблюдение за вызовами главного потока только при включённом замере. Просит рабочую
+  // частоту экрана, но сами вызовы ещё не доказывают показ кадра.
   func start() {
     guard MetricsRuntime.enabled, link == nil else { return }
     previous = nil
@@ -131,6 +151,8 @@ struct NumericStatistics: Codable {
     link = value
     value.add(to: .main, forMode: .common)
   }
+  // Замеряет время от предыдущего вызова на главном потоке и сохраняет новую отметку. Первый
+  // вызов задаёт начало, потому что интервала ещё нет.
   func tick(_ link: CADisplayLink) {
     let now = CACurrentMediaTime()
     if let previous {
@@ -139,17 +161,23 @@ struct NumericStatistics: Codable {
     }
     previous = now
   }
+  // Останавливает наблюдение, очищает предыдущую отметку и просит записать отчёт. Повторный
+  // запуск не сравнит первый сигнал с прошлым окном.
   func stop() {
     link?.invalidate()
     link = nil
     previous = nil
     MetricsRuntime.export()
   }
+  // Выключает таймер при освобождении наблюдателя, чтобы он не продолжал вызывать пустой
+  // обработчик.
   deinit { link?.invalidate() }
 }
 
 @MainActor private final class MotionTick: NSObject {
   weak var owner: ScrollMotionProbe?
+  // Просит наблюдатель записать одно положение ленты. Слабый владелец позволяет завершить
+  // наблюдение после ухода экрана.
   @objc func tick(_ link: CADisplayLink) { owner?.record(.sample) }
 }
 
@@ -185,6 +213,8 @@ struct NumericStatistics: Codable {
   private var clockID = "", nextClockMarker = 0.0
   private var clockMarkerRequests = 0, renderCount = 0
   private var recordsMotion = false
+  // Подключает измерение движения или только сверку времени при запросе диагностики. В режиме
+  // часов не создаёт регулярный сбор положений.
   func start(_ scroll: UIScrollView) {
     let requested = getenv("KANDINSKY_SCROLL_MOTION").map { String(cString: $0) == "1" } ?? false
     let clockOnly = getenv("KANDINSKY_PERF_CLOCK").map { String(cString: $0) == "1" } ?? false
@@ -206,12 +236,15 @@ struct NumericStatistics: Codable {
     link.add(to: .main, forMode: .common)
     self.link = link
   }
+  // Считает проходы отрисовки, пока отчёт открыт, и отмечает время. По счётчику можно увидеть
+  // работу раскладки отдельно от смены положения ленты.
   func noteRender() {
     guard !closed, output != nil else { return }
     renderCount += 1
     noteClock()
   }
-  /// Метка связывает время в отчёте прокрутки со временем в системном журнале.
+  // Записывает общую метку отчёта и системного журнала не чаще раза в секунду, кроме явного
+  // запроса. По ней можно совместить два источника по времени.
   private func noteClock(force: Bool = false) {
     guard !closed, output != nil else { return }
     let now = CACurrentMediaTime()
@@ -227,6 +260,9 @@ struct NumericStatistics: Codable {
       """
     )
   }
+  // Снимком записывает положение, высоту, жест и движение, а на регулярном пробном вызове ещё и
+  // видимое положение слоя. При неверных числах или заполнении считает потерянные замеры без
+  // роста памяти.
   func record(_ event: Event, willDecelerate: Bool? = nil, preservingMotion: Bool? = nil) {
     guard !closed, output != nil, recordsMotion, let scroll else { return }
     noteClock()
@@ -256,6 +292,8 @@ struct NumericStatistics: Codable {
         willDecelerate: willDecelerate,
         preservingMotion: preservingMotion))
   }
+  // Добавляет последнюю отметку, останавливает таймер и освобождает ссылку на прокрутку. Отчёт
+  // сохраняется фоном, чтобы закрытие чата не ждало диска.
   func close() {
     guard !closed else { return }
     noteClock(force: true)
@@ -282,5 +320,7 @@ struct NumericStatistics: Codable {
       } catch { NSLog("Kandinsky motion diagnostic export failed: %@", String(describing: error)) }
     }
   }
+  // Выключает ещё запущенный таймер при уходе наблюдателя. Даже без отдельного закрытия
+  // регулярные вызовы прекратятся.
   deinit { link?.invalidate() }
 }

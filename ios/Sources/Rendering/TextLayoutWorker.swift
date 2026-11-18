@@ -1,14 +1,19 @@
+// Разметка текста на айфоне выполняется двумя фоновыми работниками. Одна очередь решает, какие
+// строки пустить первыми, и ограничивает запас задач. Готовые рисунки хранятся отдельно с
+// пределом памяти.
+
 import Foundation
 final class TextLayoutCancellation: @unchecked Sendable {
   private let lock = NSLock()
   private var value = false
-  /// Очередь и вычисление читают этот признак, чтобы не отдавать устаревший результат закрытому или
-  /// изменившемуся экрану.
+  // Помечаем задачу отменённой под защитой общей блокировки. Очередь и сам расчёт могут проверить
+  // этот признак из разных потоков.
   func cancel() {
     lock.lock()
     value = true
     lock.unlock()
   }
+  // Читаем признак отмены под блокировкой, потому что его может менять другой поток.
   var isCancelled: Bool {
     lock.lock()
     defer { lock.unlock() }
@@ -29,6 +34,8 @@ final class TextLayoutWorker: @unchecked Sendable {
   private var pending: [Job] = []
   private var visibleKeys: Set<TextLayoutKey> = []
 
+  // Сохраняем новые ключи видимых строк и передвигаем их ожидающие задачи вперёд. После смены
+  // направления они больше не ждут прежнюю подготовку за краем.
   func prioritizeVisible(_ keys: Set<TextLayoutKey>) {
     coordinator.async {
       guard self.visibleKeys != keys else { return }
@@ -41,6 +48,9 @@ final class TextLayoutWorker: @unchecked Sendable {
   }
   private var active = 0
   private var closed = false
+  // Добавляем работу в очередь с меткой сцены, предварительно удалив отменённые задачи. Если
+  // очередь заполнена, видимая строка может вытеснить дальнюю. Остальные получают ответ об
+  // отмене.
   @discardableResult func prepare(
     message: Message, key: TextLayoutKey, ticket: Int,
     completion: @escaping @Sendable (Int, PreparedText?) -> Void
@@ -83,6 +93,8 @@ final class TextLayoutWorker: @unchecked Sendable {
     }
     return token
   }
+  // Пока свободен один из двух работников, берём следующую задачу с начала очереди. Результат
+  // возвращаем потоку экрана, а отменённый рисунок освобождаем, не передавая его в сцену.
   private func drain() {
     while active < 2 && !pending.isEmpty && !closed {
       let job = pending.removeFirst()
@@ -110,6 +122,8 @@ final class TextLayoutWorker: @unchecked Sendable {
       }
     }
   }
+  // Запрещаем новые задачи и отвечаем отменой всем ожидающим. Уже запущенный расчёт проверит
+  // закрытие перед выдачей результата.
   func close() {
     coordinator.async {
       self.closed = true
@@ -126,8 +140,8 @@ final class TextLayoutWorker: @unchecked Sendable {
   private(set) var bytes = 0
   private(set) var revision = 0
   var limit = 32 * 1024 * 1024
-  /// Успешное чтение делает запись недавно использованной, чтобы при следующем вытеснении сначала ушли более
-  /// старые обращения.
+  // Возвращаем готовую разметку по точному ключу и помечаем обращение свежим. Редко используемые
+  // рисунки так уйдут раньше видимых.
   func value(_ key: TextLayoutKey) -> PreparedText? {
     if let v = values[key] {
       order.removeAll { $0 == key }
@@ -136,6 +150,9 @@ final class TextLayoutWorker: @unchecked Sendable {
     }
     return nil
   }
+  // Учитываем размер новой разметки и убираем прежнюю копию того же ключа. Слишком большой
+  // рисунок не занимает всё хранилище, а изменение номера сбрасывает окно, которое могло его
+  // использовать.
   func insert(_ value: PreparedText) {
     let key = value.key
     revision &+= 1
@@ -149,6 +166,8 @@ final class TextLayoutWorker: @unchecked Sendable {
     bytes += value.byteCost
     trim()
   }
+  // Удаляем давно не использованные записи, пока не соблюдены пределы по памяти и числу строк.
+  // Сообщаем новому окну о том, что часть рисунков исчезла.
   func trim() {
     let previousCount = values.count
     while bytes > limit || values.count > 256 {
@@ -158,6 +177,8 @@ final class TextLayoutWorker: @unchecked Sendable {
     }
     if values.count != previousCount { revision &+= 1 }
   }
+  // Сбрасываем все записи и размер, меняя номер содержимого. Подготовленное окно с прежними
+  // рисунками больше не может их выдать.
   func clear() {
     revision &+= 1
     values.removeAll()

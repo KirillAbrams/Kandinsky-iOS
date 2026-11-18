@@ -1,3 +1,6 @@
+// Проверяет модель входа и форму айфона на подставных ответах. Сценарии отделяют регистрацию от
+// восстановления и проверяют защиту от повторных действий и отказов сохранения.
+
 import UIKit
 import XCTest
 @testable import Kandinsky
@@ -7,21 +10,30 @@ private final class RecordingAccountService: AccountEntryService {
   var signInError: Error?
   var closeCount = 0
   let profile = NetworkProfile(userId: 1, deviceId: "phone", name: "reader", token: "token", expiresAtMs: 0)
+  // Запоминает, для какого шага просили письмо. По этой отметке тест отличает два назначения кода
+  // без отправки настоящей почты.
   func requestEmailCode(email: String, recovery: Bool) async throws {
     calls.append(recovery ? "recover" : "register")
   }
+  // Записывает использованный код восстановления. Проверка видит, что форма выбрала смену пароля
+  // с тем значением, которое ввели.
   func resetPassword(email: String, code: String, password: String) async throws {
     calls.append("reset " + code)
   }
+  // Запоминает обычный вход или код регистрации и возвращает проверочный профиль либо заданную
+  // ошибку. Так можно проверить оба исхода без рабочего аккаунта.
   func signIn(email: String, password: String, registrationCode: String?) async throws -> NetworkProfile {
     calls.append(registrationCode ?? "login")
     if let signInError { throw signInError }
     return profile
   }
+  // Увеличивает число закрытий, чтобы тест мог обнаружить повторный вызов освобождения службы.
   func close() { closeCount += 1 }
 }
 
 @MainActor final class AccountEntryViewModelTests: XCTestCase {
+  // Отправляет проверочные значения и ждёт, когда модель перестанет быть занятой. Это убирает
+  // зависимость проверки от скорости фоновой задачи.
   private func submit(_ model: AccountEntryViewModel, code: String = "", resending: Bool = false) async {
     let done = expectation(description: "Форма приняла ответ")
     model.onChange = { if !model.isBusy { done.fulfill() } }
@@ -30,6 +42,8 @@ private final class RecordingAccountService: AccountEntryService {
     model.onChange = nil
   }
 
+  // Проходит запрос и повтор кода, ошибочный ввод, смену пароля и регистрацию. Сверяет порядок
+  // команд и убеждается, что восстановление само по себе не создаёт вход.
   func testRecoveryAndRegistrationKeepDifferentPurposes() async {
     let service = RecordingAccountService()
     var saved: [Int64] = []
@@ -53,6 +67,8 @@ private final class RecordingAccountService: AccountEntryService {
     XCTAssertEqual(saved, [1, 1])
   }
 
+  // Отправляет одну форму дважды и закрывает её до обработки ответа. Второй запрос не должен
+  // начаться, а первый после закрытия не сохранит профиль.
   func testDuplicateSubmissionAndClosedScreenDoNotSaveProfile() async {
     let service = RecordingAccountService()
     var saved = false
@@ -67,6 +83,8 @@ private final class RecordingAccountService: AccountEntryService {
     XCTAssertFalse(saved)
   }
 
+  // Передаёт неверный адрес и короткий пароль. Проверяет подсказки, прежний шаг и отсутствие
+  // сетевого обращения.
   func testInvalidInputKeepsTheLoginFormAndNeverUsesTheNetwork() {
     let service = RecordingAccountService()
     let model = AccountEntryViewModel(api: service, loadProfiles: { [] }, saveProfile: { _ in })
@@ -79,6 +97,8 @@ private final class RecordingAccountService: AccountEntryService {
     XCTAssertEqual(model.step, .login)
   }
 
+  // Подставляет отказы сервера и отсутствие связи, сравнивает объяснения и шаг. Каждая ошибка
+  // должна оставить форму открытой без сохранённого входа.
   func testFailedLoginShowsActionableMessageAndNeverSavesSession() async {
     let service = RecordingAccountService()
     let model = AccountEntryViewModel(api: service, loadProfiles: { [] }, saveProfile: { _ in
@@ -106,6 +126,8 @@ private final class RecordingAccountService: AccountEntryService {
     XCTAssertEqual(service.calls, Array(repeating: "login", count: failures.count + 1))
   }
 
+  // Подставляет сбой чтения и сохранения профиля, затем повторяет после исправления. Проверяет,
+  // что выбор происходит после удачной записи и что закрытая форма больше его не принимает.
   func testUnreadableOrUnsavableProfileNeverReplacesTheCurrentAccount() {
     let service = RecordingAccountService()
     let storageError = CocoaError(.fileReadNoPermission)
@@ -139,7 +161,11 @@ private final class RecordingAccountService: AccountEntryService {
 
 
 @MainActor final class AccountEntryControllerTests: XCTestCase {
+  // Ищет нужный элемент формы по устойчивому имени и проверяет его вид. Если поле исчезло или
+  // поменяло назначение, проверка остановится у понятной причины.
   private func component<T: UIView>(_ id: String, in root: UIView, as type: T.Type) throws -> T {
+    // Обходит вложенные области, пока не найдёт элемент с нужным именем. Так тест переживает
+    // перестановку контейнеров внутри окна.
     func find(_ view: UIView) -> T? {
       if view.accessibilityIdentifier == id { return view as? T }
       for child in view.subviews {
@@ -150,6 +176,8 @@ private final class RecordingAccountService: AccountEntryService {
     return try XCTUnwrap(find(root), id)
   }
 
+  // Нажимает кнопки настоящей формы и проверяет скрытие пароля, сохранение текста при показе,
+  // ошибку адреса и очистку полей при смене шага. Также проверяет кнопку возврата.
   func testLoginScreenValidatesInputAndResetsPasswordWhenChangingSteps() throws {
     let controller = AccountEntryController(api: NetworkAPI(profile: nil))
     var cancelled = false

@@ -1,3 +1,6 @@
+// Проверяет сетевые запросы на заранее заданных ответах и временной базе. Так можно воспроизвести
+// потерю связи и сверить порядок запросов без обращения к рабочему серверу.
+
 import Foundation
 import UIKit
 import XCTest
@@ -5,6 +8,8 @@ import XCTest
 @testable import Kandinsky
 
 @MainActor final class NetworkAPITests: XCTestCase {
+  // Подставляет обрыв чтения и потерянный ответ записи. Сравнивает адреса и порядок вызовов,
+  // чтобы безопасное чтение повторилось, а запись сама не ушла второй раз.
   func testLostReadIsRetriedWhileAnUnansweredWriteIsSentOnlyOnce() async throws {
     let data = Data(#"{"chats":[]}"#.utf8)
     let api = makeAPI([
@@ -26,6 +31,8 @@ import XCTest
     ])
   }
 
+  // Вызывает отправку кодов, восстановление, вход, регистрацию и вход по приглашению. Сверяет
+  // адреса, отсутствие старого ключа и данные профилей, полученных после успешного входа.
   func testAccountActionsSelectTheirOwnEndpointsAndDecodeTheReturnedProfile() async throws {
     let profile = testProfile()
     let data = try JSONEncoder().encode(profile)
@@ -54,6 +61,8 @@ import XCTest
     XCTAssertTrue(requests.allSatisfy { $0.value(forHTTPHeaderField: "Authorization") == nil })
   }
 
+  // Проверяет отклонение чужого пути, короткого приглашения и чрезмерного ответа. Сверяет ключ
+  // в отправленных запросах и ждёт отзыва входа только при соответствующем отказе сервера.
   func testBadPathsAndResponsesRespectTheSessionBoundary() async throws {
     let profile = testProfile()
     let expired = expectation(description: "Сигнал об отзыве сеанса")
@@ -95,6 +104,9 @@ import XCTest
                    Array(repeating: "Bearer " + profile.token, count: 3))
   }
 
+  // Имитирует потерянный ответ при повторе генерации и сверяет номер в базе и повторных запросах.
+  // После сохранения обновлённой строки старый номер убирается, а отдельный повтор файла несёт
+  // номер прежнего запуска.
   func testGenerationRetryKeepsItsIDUntilTheUpdatedRowIsSaved() async throws {
     let h = try await RepositoryHarness.open()
     let profile = testProfile()
@@ -149,6 +161,8 @@ import XCTest
     try await h.close()
   }
 
+  // Проверяет отклонение чужого чата и неподходящего вложения до запроса. Сверяет, что удаление
+  // результата, удаление текста и жалоба адресованы нужной серверной строке.
   func testGenerationContentAndReportActionsTargetTheResolvedServerRow() async throws {
     let h = try await RepositoryHarness.open()
     let profile = testProfile()
@@ -180,6 +194,8 @@ import XCTest
     try await h.close()
   }
 
+  // Выбирает недавний снимок как исходник, сверяет сохранённые байты и отсутствие второй записи
+  // загрузки. Дополнительно проверяет настройки генерации и удаление исходника из черновика.
   func testRecentPhotoBecomesTheDraftReferenceWithoutASecondUpload() async throws {
     let h = try await RepositoryHarness.open()
     let fixtures = try XCTUnwrap(
@@ -262,11 +278,15 @@ import XCTest
     try await h.close()
   }
 
+  // Ищет элемент управления по признаку доступности среди вложенных представлений. Тест нажимает
+  // нужную кнопку даже после перестройки экранных частей.
   private func control(_ id: String, in view: UIView) -> UIControl? {
     if let control = view as? UIControl, control.accessibilityIdentifier == id { return control }
     return view.subviews.lazy.compactMap { self.control(id, in: $0) }.first
   }
 
+  // Устанавливает нужные таблицы, записывает ответ неудачной генерации и читает одну строку через
+  // хранилище истории. Повтор проверяется на реально записанном местном состоянии.
   private func seedGeneration(
     _ sync: NetworkSync, repository: NetworkChatRepository, job: String
   ) async throws -> Message {
@@ -280,6 +300,8 @@ import XCTest
     return try XCTUnwrap(history.rows.first)
   }
 
+  // Готовит ответ для одной и той же строки до и после запуска. Разные версии и ход работы дают
+  // проверить обновление вместо появления второй строки.
   private func generationResponse(job: String, running: Bool) throws -> Data {
     var metadata: [String: Any] = [
       "kandinskyJobId": job, "kandinskyStatus": running ? "running" : "failed",
@@ -296,6 +318,8 @@ import XCTest
     ])
   }
 
+  // Разбирает тело запроса напрямую или считывает переданный поток до конца. Так тест видит
+  // отправленные поля независимо от способа их передачи сетевой службой.
   private func requestJSON(_ request: URLRequest) throws -> [String: String] {
     if let data = request.httpBody { return try JSONDecoder().decode([String: String].self, from: data) }
     let stream = try XCTUnwrap(request.httpBodyStream)
@@ -312,12 +336,16 @@ import XCTest
     return try JSONDecoder().decode([String: String].self, from: data)
   }
 
+  // Возвращает условный профиль для местной проверки с узнаваемыми полями. Настоящая учётная
+  // запись для этих запросов не требуется.
   private func testProfile() -> NetworkProfile {
     NetworkProfile(userId: 2, deviceId: "local-fixture", name: "Проверка",
                    token: String(repeating: "a", count: 64), expiresAtMs: Int64.max,
                    username: "fixture")
   }
 
+  // Устанавливает очередь ответов и создаёт временную сетевую сессию с перехватом запросов. Тест
+  // не передаёт условные запросы внешнему серверу.
   private func makeAPI(_ replies: [ScriptedHTTP.Reply], profile: NetworkProfile? = nil) -> NetworkAPI {
     ScriptedHTTP.configure(replies)
     let configuration = URLSessionConfiguration.ephemeral
@@ -341,6 +369,8 @@ private final class ScriptedHTTP: URLProtocol, @unchecked Sendable {
 
   private static let script = Script()
 
+  // Под замком сбрасывает прошлые запросы и задаёт новые ответы. Повторная настройка не оставит
+  // следов соседнего теста.
   static func configure(_ replies: [Reply]) {
     script.lock.withLock {
       script.received.removeAll()
@@ -348,11 +378,19 @@ private final class ScriptedHTTP: URLProtocol, @unchecked Sendable {
     }
   }
 
+  // Возвращает снимок накопленных запросов под замком. Тест может сверять порядок, пока
+  // обработчик работает на другом потоке.
   static func requests() -> [URLRequest] { script.lock.withLock { script.received } }
 
+  // Разрешает перехват каждого запроса временной сессии. Без этого часть запросов ушла бы по
+  // обычному сетевому пути.
   override class func canInit(with request: URLRequest) -> Bool { true }
+  // Возвращает исходный запрос без правок. Тогда проверка видит адрес и параметры, которые
+  // действительно собрал клиент.
   override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
+  // Запоминает исходный запрос и выдаёт следующий заданный ответ или сбой. При исчерпании ответов
+  // сообщает об ошибке, чтобы лишний вызов не прошёл незаметно.
   override func startLoading() {
     let reply = Self.script.lock.withLock {
       Self.script.received.append(request)
@@ -374,5 +412,7 @@ private final class ScriptedHTTP: URLProtocol, @unchecked Sendable {
     }
   }
 
+  // Завершает отмену без дополнительной работы. Ответ выдаётся сразу, поэтому отдельной загрузки,
+  // которую надо остановить, здесь нет.
   override func stopLoading() {}
 }

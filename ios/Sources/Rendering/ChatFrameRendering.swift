@@ -1,3 +1,7 @@
+// Подготовка кадра ленты на айфоне сшивает измеренные строки, отрисовку файлов и действия
+// доступности. Она переиспользует готовые части, а незнакомый участок просит прочитать порцией.
+// Срочные видимые строки получают место раньше далёких.
+
 import UIKit
 
 final class PreparedChatRowWindow {
@@ -29,11 +33,15 @@ final class PreparedChatRowWindow {
   let rows: [Row]
   private var fragmentWindow: FragmentWindow?
 
+  // Закрепляем готовые строки за ключом их геометрии и оформления. Такое окно можно использовать
+  // между кадрами, пока размеры и нужный диапазон совпадают.
   init(key: Key, rows: [Row]) {
     self.key = key
     self.rows = rows
   }
 
+  // Собираем ограниченное число видимых частей строк и запоминаем границы, внутри которых состав
+  // не меняется. При малом сдвиге возвращаем прежний снимок вместо повторного перебора.
   func snapshot(top: CGFloat, bottom: CGFloat, ticket: Int) -> SceneSnapshot {
     if let window = fragmentWindow, window.snapshot.ticket == ticket,
       top > window.topAfter, top <= window.topAtMost,
@@ -75,8 +83,8 @@ final class PreparedChatRowWindow {
 }
 
 extension ChatScrollHost {
-  /// Учитывает шрифт и масштаб, чтобы сохранённая разметка использовалась только при совпадении условий
-  /// показа.
+  // Составляем ключ по редакции сообщения, месту по ширине, размеру шрифта и масштабу. Для фото и
+  // карточек учитываем пропорции, иначе готовая раскладка могла бы оказаться от другой ширины.
   func key(_ row: Message) -> TextLayoutKey {
     let viewport = lastSize.width > 0 ? lastSize.width : bounds.width
     let visual =
@@ -106,6 +114,8 @@ extension ChatScrollHost {
       scale: Int(self.window?.screen.scale ?? UIScreen.main.scale), roundDiameter: diameter)
   }
 
+  // Выбираем левый край по стороне сообщения и виду содержимого. Карточки и кнопки имеют
+  // отдельные поля, чтобы действие и рисунок остались на одной линии.
   func rowLeft(_ row: Message, _ prepared: PreparedText) -> CGFloat {
     if let card = prepared.generationCard {
       return card.isBatch || card.generation.isActive ? 10 : 6
@@ -116,6 +126,8 @@ extension ChatScrollHost {
       ? bounds.width - prepared.width - (media ? 6 : 12) : (media ? 6 : 18)
   }
 
+  // Принимаем измерения только для текущей редакции и ширины. Применяем их одним пересчётом,
+  // сохраняя место чтения и не притягивая к последнему сообщению во время жеста.
   private func applyPreparedHeights() {
     guard !pendingHeights.isEmpty else { return }
     let updates = pendingHeights
@@ -139,6 +151,9 @@ extension ChatScrollHost {
     if changed { setGeometry(anchor: anchor, preservingMotion: true) }
   }
 
+  // Берём готовые строки, а пропущенную порцию просим у хранилища рядом с экраном. Отменяем
+  // далёкие расчёты и сначала готовим видимые. Полностью готовое окно удерживаем для следующих
+  // кадров.
   private func preparedRows(in range: Range<Int>, current: Range<Int>) -> PreparedChatRowWindow {
     let windowKey = PreparedChatRowWindow.Key(
       range: range, geometryRevision: index.geometryRevision, layoutRevision: cache.revision,
@@ -230,6 +245,9 @@ extension ChatScrollHost {
     return window
   }
 
+  // Согласуем новые высоты, строки, даты, вложения и доступные действия в одном кадре. Держим
+  // запас по направлению движения, но оставляем место всему видимому экрану. Когда сцена готова,
+  // завершаем ожидание первого кадра.
   func render() {
     guard bounds.width > 0, bounds.height > 0, !closed else { return }
     let mediaBefore = min(bounds.height * 3, CGFloat(preparation.mediaBefore))

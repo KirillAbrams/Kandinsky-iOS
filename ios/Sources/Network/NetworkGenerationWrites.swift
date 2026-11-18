@@ -1,7 +1,11 @@
+// Сохраняет номера повтора и результаты действий с генерацией. Если сеть оборвётся раньше ответа,
+// местная запись позволит снова послать ту же команду.
+
 import Foundation
 
 extension NetworkStore {
-  // До подтверждения сервером повтор сохраняет свой номер даже после закрытия приложения.
+  // Сохраняет предложенный номер только если записи ещё нет, затем читает сохранённое значение.
+  // Запуск приложения заново не заменит уже использованный номер повтора.
   func pendingRetry(_ db: SQLiteConnection, key: String, proposed: UUID?) throws -> String {
     let candidate = (proposed ?? UUID()).uuidString.lowercased()
     try db.execute(
@@ -13,6 +17,8 @@ extension NetworkStore {
     return id
   }
 
+  // Проверяет принадлежность строк одному чату и сливает их в одной записи базы. Убирает отметку
+  // повтора только для совпавшего номера, иначе старый ответ мог бы закрыть более новую попытку.
   func generationRows(
     _ db: SQLiteConnection, chat: Int64, data: Data,
     retryKey: String? = nil, operation: String? = nil

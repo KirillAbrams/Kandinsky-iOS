@@ -1,7 +1,12 @@
+// Даты в ленте на айфоне используют готовые плашки у первых сообщений каждого дня. При движении
+// меняются их координаты. Новая плашка нужна только при смене дня или оформления.
+
 import UIKit
 @MainActor final class ScrollingDayBadge: UIView {
   let label: String
   let studio: Bool
+  // Создаём плашку из подписи, номера сообщения и вида оформления. Система озвучивает её как
+  // текст, а касания продолжают идти в ленту.
   init(label: String, id: MessageID, studio: Bool) {
     self.label = label
     self.studio = studio
@@ -13,7 +18,10 @@ import UIKit
     accessibilityLabel = label
     accessibilityTraits = .staticText
   }
+  // Дата и номер сообщения поступают из истории при создании. Сохранённая разметка их не знает,
+  // поэтому этот путь закрыт.
   required init?(coder: NSCoder) { fatalError() }
+  // Рисуем подпись даты на скруглённом фоне. Цвета и высота текста зависят от вида чата.
   override func draw(_ rect: CGRect) {
     if studio {
       UIColor(red: 228.0 / 255, green: 240.0 / 255, blue: 231.0 / 255, alpha: 1).setFill()
@@ -39,6 +47,8 @@ import UIKit
     f.dateFormat = "d MMM"
     return f
   }()
+  // Убираем ушедшие даты, подбираем подпись и измеряем её по ширине окна. Существующую плашку
+  // двигаем, пока надпись и оформление те же, и возвращаем её для озвучивания.
   func apply(
     _ days: [HistoryDay], offset: CGFloat, width: CGFloat, container: UIView, studio: Bool = false
   ) -> [UIView] {
@@ -71,7 +81,8 @@ import UIKit
       return view
     }
   }
-  /// Очищает список владельцев, чтобы закрытая история не сохраняла невидимые плашки.
+  // Удаляем оставшиеся плашки с экрана и сбрасываем ссылки. Закрытая история не должна держать
+  // подписи для старых дат.
   func close() {
     views.values.forEach { $0.removeFromSuperview() }
     views.removeAll()

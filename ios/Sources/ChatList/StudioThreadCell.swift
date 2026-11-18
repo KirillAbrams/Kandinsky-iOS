@@ -1,3 +1,6 @@
+// Представляет строку чата в списке айфона. Разделяет нажатия на название и действия, показывает
+// закрепление, выделение и генерацию.
+
 import UIKit
 
 final class StudioThreadCell: UITableViewCell {
@@ -8,6 +11,8 @@ final class StudioThreadCell: UITableViewCell {
   private let busy = UIActivityIndicatorView(style: .medium)
   private var generating = false
 
+  // Создаёт подсветку, знак закрепления, индикатор и две независимые области действий. Служба
+  // доступности видит название и меню отдельно.
   override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
     super.init(style: style, reuseIdentifier: reuseIdentifier)
     selectionStyle = .none
@@ -35,8 +40,12 @@ final class StudioThreadCell: UITableViewCell {
     accessibilityElements = [openButton, actions]
   }
 
+  // Запрещает загрузку этой строки из сохранённой разметки. Её элементы должны быть созданы и
+  // настроены вместе обычным способом.
   required init?(coder: NSCoder) { fatalError("Use programmatic initializer") }
 
+  // Подставляет название, меню, выделение и признаки нового чата. Заново устанавливает подпись
+  // озвучивания, чтобы состояние старой строки не досталось новой.
   func bind(_ row: StudioThread, selected: Bool, menu: UIMenu) {
     marker.image =
       row.pinned ? UIImage(named: "HeroiconsPaperClip")?.withRenderingMode(.alwaysTemplate) : nil
@@ -54,11 +63,15 @@ final class StudioThreadCell: UITableViewCell {
     setNeedsLayout()
   }
 
+  // Перепроверяет, нужно ли движение индикатора после появления или снятия строки. Вне окна
+  // индикатор не должен работать.
   override func didMoveToWindow() {
     super.didMoveToWindow()
     updateAnimation()
   }
 
+  // Убирает состояние генерации и прежнее меню перед повторным использованием. Новая карточка не
+  // покажет чужие действия до привязки.
   override func prepareForReuse() {
     super.prepareForReuse()
     generating = false
@@ -66,10 +79,14 @@ final class StudioThreadCell: UITableViewCell {
     actions.menu = nil
   }
 
+  // Запускает индикатор только при генерации и наличии видимого окна. Невидимая строка не
+  // расходует ресурсы на движение.
   private func updateAnimation() {
     if generating && window != nil { busy.startAnimating() } else { busy.stopAnimating() }
   }
 
+  // Расставляет подсветку, индикатор и отдельную кнопку действий. Оставляет нужные поля под
+  // закрепление и занятость, чтобы надпись не перекрывала кнопки.
   override func layoutSubviews() {
     super.layoutSubviews()
     highlight.frame = contentView.bounds.insetBy(dx: 8, dy: 1)

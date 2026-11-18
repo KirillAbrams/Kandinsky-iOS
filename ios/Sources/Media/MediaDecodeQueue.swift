@@ -1,3 +1,6 @@
+// Ограничивает число фоновых работ и ожидающих задач. Возвращает итог в очередь экрана и
+// освобождает ненужные результаты.
+
 import Foundation
 final class MediaDecodeQueue: @unchecked Sendable {
   private final class Job {
@@ -6,6 +9,8 @@ final class MediaDecodeQueue: @unchecked Sendable {
     var state = State.pending
     let execute: (Job) -> Void
     let fail: (Error) -> Void
+    // Запоминает действия выполнения и отказа для одной задачи. Ожидающая задача может получить
+    // отказ без запуска тяжёлой работы.
     init(execute: @escaping (Job) -> Void, fail: @escaping (Error) -> Void) {
       self.execute = execute
       self.fail = fail
@@ -18,6 +23,8 @@ final class MediaDecodeQueue: @unchecked Sendable {
   private var closed = false
   private let maximumWorkers: Int
   private let maximumPending: Int
+  // Проверяет пределы очереди и число работников. Без верхних границ быстрая прокрутка могла бы
+  // набрать слишком много работы.
   init(maximumWorkers: Int = 2, maximumPending: Int = 16) {
     precondition((1...2).contains(maximumWorkers))
     precondition((1...256).contains(maximumPending))
@@ -26,6 +33,8 @@ final class MediaDecodeQueue: @unchecked Sendable {
   }
   var runningCount: Int { gate.sync { active.count } }
   var pendingCount: Int { gate.sync { pending.count } }
+  // Добавляет задачу с возможностью отмены, ставит важную ближе к началу и отклоняет избыток.
+  // После вычисления выдаёт результат или освобождает его, если запрос уже снят.
   @discardableResult func submit<T>(
     priority: Int = 0, work: @escaping () throws -> T, dispose: @escaping (T) -> Void,
     completion: @escaping (Result<T, Error>) -> Void
@@ -75,6 +84,8 @@ final class MediaDecodeQueue: @unchecked Sendable {
     }
     return job.token
   }
+  // Выбирает ожидающее только при свободном работнике и пропускает отменённое. Так в фоне
+  // действует ограничение даже после завершения соседней работы.
   private func drain() {
     while !closed, active.count < maximumWorkers, !pending.isEmpty {
       let job = pending.removeFirst()
@@ -89,6 +100,8 @@ final class MediaDecodeQueue: @unchecked Sendable {
     }
   }
   /// Активные задания тоже помечает отменёнными, чтобы поздний результат был освобождён.
+  // Запрещает новые задачи, сообщает об отмене ожидающим и отменяет активные. Поздние результаты
+  // будут освобождены при возврате.
   func close() {
     gate.sync {
       guard !closed else { return }

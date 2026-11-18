@@ -1,13 +1,21 @@
+// Сцена истории на айфоне удерживает готовые слои сообщений по их номерам. Прокрутка передвигает
+// их без нового рисунка текста. Возле экрана сцена заранее готовит часть фото и кадров, даёт
+// движение самым видимым роликам и освобождает остальное.
+
 import UIKit
 struct SceneFragment {
   let prepared: PreparedText
   let part: Int
   let frame: CGRect
+  // Длинное сообщение может занять несколько фрагментов. Ключ удерживает отдельный слой каждой
+  // части.
   var id: FragmentID { FragmentID(messageID: prepared.key.messageID, part: part) }
 }
 final class SceneSnapshot {
   let ticket: Int
   let fragments: [SceneFragment]
+  // Связываем набор фрагментов с номером сцены. Это позволяет принять снимок только в той
+  // раскладке, для которой он был собран.
   init(ticket: Int, fragments: [SceneFragment]) {
     self.ticket = ticket
     self.fragments = fragments
@@ -22,14 +30,21 @@ struct SceneMetrics {
 @MainActor fileprivate final class MediaStampLayer: CALayer {
   var raster: MediaCancellation?, rasterID: UUID?
   var ready = false
-  /// Назначает ему имя, чтобы его можно было отличить при разборе дерева слоёв.
+  // Создаём прозрачный слой подписи поверх файла и даём ему имя для разбора слоёв. Под ним
+  // остаётся сам кадр вложения.
   override init() {
     super.init()
     isOpaque = false
     name = "media.stamp"
   }
+  // Позволяем системе создать копию слоя подписи при показе. Она получает свойства исходного слоя
+  // через штатное копирование.
   override init(layer: Any) { super.init(layer: layer) }
+  // Подпись строится из подготовленного рисунка сцены. Загрузка из файла разметки не создаёт этой
+  // связи.
   required init?(coder: NSCoder) { fatalError() }
+  // Отменяем подготовку подписи и убираем готовые дочерние рисунки. Сбрасываем номер запроса,
+  // чтобы старый результат не накрыл новую подпись.
   func clear() {
     raster?.cancel()
     raster = nil
@@ -52,11 +67,15 @@ private struct MediaStampBitmap {
   var needsStaticRetry = false
   var image: MediaImageSlot?
   var extraImages: [Int: MediaImageSlot] = [:]
+  // Закрываем основное изображение и все дополнительные вложения строки. Они больше не удерживают
+  // кадры после ухода сообщения.
   func retireImages() {
     image?.close()
     image = nil
     retireExtraImages()
   }
+  // Освобождаем рисунки остальных ячеек, сохраняя основное изображение. Это нужно, когда карточка
+  // снова показывает один файл.
   func retireExtraImages() {
     for image in extraImages.values { image.close() }
     extraImages.removeAll()
@@ -64,6 +83,8 @@ private struct MediaStampBitmap {
   var video: SilentVideoPreview?
   var albumVideos: [String: SilentVideoPreview] = [:]
   var progressLayers: [String: StudioProgressLayer] = [:]
+  // Снимаем ролики с ячеек. При обычном уходе возвращаем их на паузе в общий запас, а при
+  // закрытии освобождаем полностью.
   func retireAlbumVideos(keepingPlayers: Bool = false) {
     albumVideos.values.forEach {
       if keepingPlayers { $0.setVisible(false); $0.layer.removeFromSuperlayer() }
@@ -71,11 +92,14 @@ private struct MediaStampBitmap {
     }
     albumVideos.removeAll()
   }
-  /// Очищает сохранённые привязки, чтобы прежние проценты не остались поверх другого содержимого.
+  // Удаляем индикаторы и их привязки к ячейкам. Иначе старый процент мог бы остаться поверх
+  // другого файла.
   func retireProgress() {
     progressLayers.values.forEach { $0.removeFromSuperlayer() }
     progressLayers.removeAll()
   }
+  // Переносим готовые рисунки по номерам вложений при изменении их порядка. Кадр остаётся у
+  // своего файла, а исчезнувшие файлы освобождаем.
   func preserveAlbumImages(from old: Message, to new: Message) {
     guard old.attachments.map(\.id) != new.attachments.map(\.id) else { return }
     var previous: [String: MediaImageSlot] = [:]
@@ -93,13 +117,18 @@ private struct MediaStampBitmap {
   fileprivate var overlay: MediaStampLayer?
   var fragment: SceneFragment?
   var onRecord: (() -> Void)?
-  /// Отключает самостоятельное асинхронное рисование слоя, поскольку подготовкой управляет сцена.
+  // Создаём прозрачный слой сообщения с подготовкой под управлением сцены. Самостоятельная
+  // отрисовка слоя отключена, чтобы работа не дублировалась.
   override init() {
     super.init()
     isOpaque = false
     drawsAsynchronously = false
   }
+  // Передаём копирование слоя сообщения системе. Видимая копия продолжает пользоваться его
+  // обычными свойствами.
   override init(layer: Any) { super.init(layer: layer) }
+  // Сообщение приходит из указателя истории и своего рисунка. В сохранённой разметке такого
+  // источника нет.
   required init?(coder: NSCoder) { fatalError() }
 }
 @MainActor final class RetainedChatScene {
@@ -111,6 +140,8 @@ private struct MediaStampBitmap {
   private let imagePrefetch = MediaImagePrefetch()
   private let videoPreviews = SilentVideoPreviewPool()
   var mediaVisible = true {
+    // При скрытии файлов останавливаем подготовку и движение, затем освобождаем изображения.
+    // Скрытая переписка не продолжает держать готовые кадры активно.
     didSet {
       if !mediaVisible {
         imagePrefetch.clear()
@@ -121,7 +152,10 @@ private struct MediaStampBitmap {
       }
     }
   }
+  // При скрытии движения снимаем ролики и индикаторы, а неподвижные картинки оставляем.
   var movingMediaVisible = true { didSet { if !movingMediaVisible { retireMovingMedia() } } }
+  // Закрываем ролики и анимированные индикаторы. Возвращаем видимость основному рисунку, чтобы на
+  // месте остановившегося видео остался кадр.
   private func retireMovingMedia() {
     videoPreviews.clear()
     for node in nodes.values {
@@ -143,12 +177,17 @@ private struct MediaStampBitmap {
   private var closed = false
   private(set) var ticket = 1
   private(set) var metrics = SceneMetrics()
+  // Принимаем слой родительской истории и подписываемся на появление свободного места для
+  // предварительных показов. Тогда новую попытку можно назначить после освобождения
+  // проигрывателя.
   init(container: CALayer) {
     self.container = container
     previewObserver = MediaAdmission.observePreviewAvailability { [weak self] in
       self?.onImageReady?()
     }
   }
+  // Принимаем результат только для открытой сцены с текущим номером. Просроченный рисунок
+  // закрываем сразу, чтобы он не держал память после смены ширины или истории.
   func accept(_ resource: PreparedText, ticket: Int) -> Bool {
     guard !closed, self.ticket == ticket else {
       resource.close()
@@ -156,9 +195,14 @@ private struct MediaStampBitmap {
     }
     return true
   }
+  // Возвращаем тождество слоя по части сообщения. Проверки так отличают перенос готового слоя от
+  // создания другого.
   func nodeIdentity(for id: FragmentID) -> ObjectIdentifier? {
     nodes[id].map { ObjectIdentifier($0) }
   }
+  // Для выбранного вложения сначала ищем текущий кадр ролика, затем сохранённый чёткий кадр и
+  // готовую картинку строки. Если их нет, пробуем соседний запас, чтобы просмотр не ждал пустого
+  // экрана.
   func preview(_ id: MessageID, attachmentIndex: Int = 0) -> PreparedImage? {
     guard let node = nodes[FragmentID(messageID: id, part: 0)] else { return nil }
     if let attachments = node.fragment?.prepared.message.attachments,
@@ -182,11 +226,14 @@ private struct MediaStampBitmap {
       maxPixel: mediaThumbnailLimit(node.fragment?.prepared))
     return imagePrefetch.preview(item, store: mediaStore)
   }
-  /// Учитывает номер вложения, чтобы различать отдельные результаты альбома.
+  // Проверяем готовность рисунка отдельного вложения. В альбоме каждый файл может закончить
+  // подготовку в своё время.
   func imageReady(_ id: MessageID, attachmentIndex: Int = 0) -> Bool {
     guard let node = nodes[FragmentID(messageID: id, part: 0)] else { return false }
     return (attachmentIndex == 0 ? node.image : node.extraImages[attachmentIndex])?.ready == true
   }
+  // Проверяем рисунок и подпись каждого видимого фрагмента. Если открытие ещё ждёт медиа, требуем
+  // готовности только для ячеек, которые действительно попали на экран.
   func presentationReady(_ ids: Set<FragmentID>, requireMedia: Bool) -> Bool {
     ids.allSatisfy { id in
       guard let node = nodes[id], let fragment = node.fragment else { return false }
@@ -205,6 +252,8 @@ private struct MediaStampBitmap {
       }
     }
   }
+  // Собираем доступные повторы загрузки в порядке вложений и переводим их рамки в координаты
+  // сцены. Поверх уже играющего одиночного видео такой кнопки нет.
   func loadActions() -> [(MessageID, Int, CGRect, String)] {
     nodes.values.flatMap { node -> [(MessageID, Int, CGRect, String)] in
       guard node.video?.presented != true, let fragment = node.fragment else { return [] }
@@ -219,7 +268,8 @@ private struct MediaStampBitmap {
       }
     }
   }
-  /// Пропускает сообщения с активным одиночным видео, чтобы действие не срабатывало поверх него.
+  // Переводим касание в координаты слоя и передаём первой подходящей кнопке. Пропускаем активное
+  // видео, чтобы оно само принимало касания.
   @discardableResult func performLoadAction(at point: CGPoint) -> Bool {
     for node in nodes.values where node.video?.presented != true {
       let local = CGPoint(x: point.x - node.frame.minX, y: point.y - node.frame.minY)
@@ -229,7 +279,8 @@ private struct MediaStampBitmap {
     }
     return false
   }
-  /// Увеличивает номер поколения сцены, чтобы результаты прежней подготовки больше не принимались.
+  // Увеличиваем номер сцены, отменяем прежние задачи и снимаем рисунки, ролики и индикаторы.
+  // Результаты старой подготовки больше не применятся к новой геометрии.
   func advanceGeneration() {
     imagePrefetch.clear()
     mediaStore?.videoPlayback.prepareCovers([])
@@ -251,6 +302,9 @@ private struct MediaStampBitmap {
     appliedSnapshot = nil
     metrics.liveFragments = 0
   }
+  // Берём видимые фрагменты и до трёх соседних для подготовки медиа, сохраняя место и
+  // сзади движения. Переиспользуем слои, выбираем ограниченное число роликов по видимости и
+  // сохраняем кадр при паузе. Работа за экраном остаётся ограниченной.
   func apply(_ snapshot: SceneSnapshot) {
     guard !closed, snapshot.ticket == ticket else { return }
     let fragments = snapshot.fragments.prefix(128), view = viewport ?? container.bounds
@@ -282,6 +336,9 @@ private struct MediaStampBitmap {
     let prefetched = Set(neighbors.map(\.id))
     let videoPreviewsAllowed = mediaVisible && movingMediaVisible && MediaAdmission.previewsAllowed
     var upcomingVideo: (key: VideoPlaybackKey, fraction: CGFloat)?
+    // Выбираем самый видимый из подходящих роликов, которые только входят в кадр и уже имеют
+    // сохранённую позицию. Подготовка такого ролика использует местный файл и опережает его
+    // возврат на экран.
     func considerVideo(_ key: VideoPlaybackKey, fraction: CGFloat) {
       guard fraction >= 0.12, fraction < 0.5, fraction > (upcomingVideo?.fraction ?? 0),
         let mediaStore, mediaStore.videoPlayback.position(key) > 0
@@ -504,6 +561,8 @@ private struct MediaStampBitmap {
       for video in node.albumVideos.values where video.isPlaying { count += 1 }
     }
   }
+  // Находим фрагменты, которых больше нет в новом окне, отменяем их рисунки и снимаем слои.
+  // Ролики, которые можно переиспользовать, остаются в общем запасе на паузе.
   private func removeRetiredLayers(keeping fragments: ArraySlice<SceneFragment>) {
     metrics.windowReconciliations += 1
     let wanted = Set(fragments.map(\.id))
@@ -524,7 +583,8 @@ private struct MediaStampBitmap {
     }
   }
 
-  /// Статический рисунок зависит от разметки и размера. Видимость медиа проверяется отдельно.
+  // Меняем фон и рисунок при новой разметке или отсутствии готового кадра. Подпись поверх медиа
+  // обслуживаем отдельно, чтобы движение видео не заставляло заново рисовать всю строку.
   private func reconcileStaticContent(
     _ fragment: SceneFragment, node: MessageLayer, changed: Bool, retainContents: Bool
   ) {
@@ -579,6 +639,8 @@ private struct MediaStampBitmap {
       prepareMediaStamp(fragment, node: node, overlay: overlay)
     }
   }
+  // Сохраняем индикаторы только у видимых ячеек и удаляем ушедшие. Когда генерация закончилась,
+  // но фото ещё готовится к показу, оставляем промежуточный индикатор.
   private func bindProgress(_ fragment: SceneFragment, node: MessageLayer, viewport: CGRect) {
     guard mediaVisible, movingMediaVisible, fragment.part == 0 else {
       node.retireProgress()
@@ -586,7 +648,8 @@ private struct MediaStampBitmap {
     }
     let prepared = fragment.prepared, card = prepared.generationCard
     var keys = Set<String>()
-    /// Запоминает использованное обозначение, чтобы после обхода удалить только устаревшие индикаторы.
+    // Подключаем или обновляем индикатор конкретной ячейки по номеру и рамке. Запоминаем его
+    // среди использованных, чтобы удалить только устаревшие после обхода.
     func bind(_ id: String, _ frame: CGRect, _ progress: Int?, deliveringPhoto: Bool = false) {
       guard frame.offsetBy(dx: fragment.frame.minX, dy: fragment.frame.minY).intersects(viewport)
       else { return }
@@ -614,6 +677,8 @@ private struct MediaStampBitmap {
       node.progressLayers.removeValue(forKey: id)?.removeFromSuperlayer()
     }
   }
+  // Для альбома выбираем ограниченный размер кадра отдельной ячейки. Одиночному вложению нужен
+  // больший рисунок, а альбом из таких рисунков занял бы больше памяти.
   private func mediaThumbnailLimit(_ prepared: PreparedText?) -> Int {
     guard let prepared,
       prepared.mediaItemRects.count > 1 || prepared.generationCard?.isBatch == true
@@ -621,6 +686,8 @@ private struct MediaStampBitmap {
     return MediaImagePrefetch.albumMaxPixel
   }
 
+  // Для каждой нужной ячейки привязываем файл, поля и сохранённое изображение. Подходящий видимый
+  // ролик пользуется общим проигрывателем, остальные оставляют кадр. Ушедшие ячейки освобождаем.
   private func bindAlbum(
     _ fragment: SceneFragment, node: MessageLayer, media: MediaStore, preparing: Bool,
     upcomingVideo: VideoPlaybackKey?
@@ -722,7 +789,9 @@ private struct MediaStampBitmap {
       node.extraImages.removeValue(forKey: index)?.close()
     }
   }
-  /// Объединяет пересекающиеся области, чтобы полупрозрачный фон не рисовался дважды на одном месте.
+  // Объединяем пересекающиеся рамки подписей, чтобы прозрачность не накладывалась дважды, и
+  // готовим рисунки в общей фоновой очереди. Перед показом сверяем слой, номер сцены и конкретный
+  // запрос.
   private func prepareMediaStamp(
     _ fragment: SceneFragment, node: MessageLayer, overlay: MediaStampLayer
   ) {
@@ -789,8 +858,9 @@ private struct MediaStampBitmap {
         }
       })
   }
-  /// При необходимости сохраняет прежний рисунок до появления нового, чтобы карточка не мигала при
-  /// обновлении.
+  // Готовим неподвижную часть сообщения в фоне с пределом размеров рисунка. Для меняющейся
+  // карточки можно показать старую версию до новой, чтобы не было пустого кадра. Устаревший ответ
+  // отсекаем по номеру и слою.
   private func prepareBitmap(_ fragment: SceneFragment, node: MessageLayer, retainContents: Bool) {
     node.raster?.cancel()
     if !retainContents { node.contents = nil }
@@ -835,6 +905,8 @@ private struct MediaStampBitmap {
         }
       })
   }
+  // Прекращаем подготовку и освобождаем кадры, подписку на просмотр и очередь рисунков. После
+  // закрытия сцена не принимает ответы и не держит часы проигрывания.
   func close() {
     guard !closed else { return }
     onStaticReady = nil

@@ -1,3 +1,6 @@
+// Проверяет возврат к чёткому кадру ролика после ухода с экрана и очистки памяти. Сверяет, что
+// более свежий кадр и удаление побеждают запоздалые ответы.
+
 import UIKit
 import XCTest
 
@@ -9,11 +12,16 @@ import XCTest
     let key: VideoPlaybackKey
     let image: CGImage
     let attachment: Attachment
+    // Создаёт другой ключ показа с тем же вложением и указанным номером сообщения. Проверка может
+    // заполнить хранилище разными кадрами одного исходника.
     func keyWithID(_ id: Int64) -> VideoPlaybackKey {
       VideoPlaybackKey(messageID: id, attachment: attachment)
     }
+    // Удаляет временную папку опыта. Готовые кадры из одной проверки не должны попасть в другую.
     func close() { try? FileManager.default.removeItem(at: root) }
   }
+  // Читает настоящее пробное изображение и готовит папку, вложение и ключ. Так восстановление
+  // проверяется на известных пикселях.
   private func fixture() throws -> Fixture {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     let source = try XCTUnwrap(
@@ -36,15 +44,21 @@ import XCTest
     disk.close()
     return Fixture(root: root, key: key, image: image, attachment: attachment)
   }
+  // Получает байты рисунка для сравнения. Два разных объекта считаются одним кадром только при
+  // совпадении содержимого.
   private func pixels(_ image: CGImage?) -> Data? {
     guard let data = image?.dataProvider?.data else { return nil }
     return data as Data
   }
+  // Даёт фоновой очистке время и требует нулевой счёт памяти. Иначе старое изображение осталось
+  // бы занятым после закрытия.
   private func awaitReleased(_ budget: ImageByteBudget) async throws {
     for _ in 0..<300 where budget.bytes != 0 { try await Task.sleep(nanoseconds: 10_000_000) }
     XCTAssertEqual(budget.bytes, 0, "Obsolete pixels must release byte ownership")
   }
 
+  // Оставляет в памяти обычную картинку и восстанавливает чёткий кадр с диска. Проверяет
+  // отсутствие мелькания картинки и замену правильным остановленным кадром.
   func testReturningVideoPrefersTheDiskFrameEvenWithAPosterInMemory() async throws {
     let h = try await RepositoryHarness.open()
     let media = MediaStore(store: h.store)
@@ -83,7 +97,7 @@ import XCTest
     XCTAssertEqual(pixels(restored?.image), pixels(example.image))
     restored?.close()
 
-    // The same media slot can survive a short scroll. A later pause replaces the old frame there.
+    // При короткой прокрутке сохраняется тот же слой. Следующая пауза заменяет в нём старый кадр.
     let format = UIGraphicsImageRendererFormat.default()
     format.scale = 1
     let paused = try XCTUnwrap(UIGraphicsImageRenderer(size: CGSize(width: 64, height: 64),
@@ -100,6 +114,8 @@ import XCTest
     slot.close(); media.close(); try await h.close()
   }
 
+  // Удерживает чтение остановленного кадра вне потока экрана и сохраняет более свежий прямо
+  // сейчас. Старое завершение не должно заменить новое или удержать лишнюю память.
   func testPausedCoverRendersOffMainAndNewerImmediateCoverWins() async throws {
     let fixture = try fixture()
     let budget = ImageByteBudget()
@@ -136,6 +152,8 @@ import XCTest
     try await awaitReleased(budget)
   }
 
+  // Очищает хранилище при одной выполняемой и одной ожидающей подготовке. Ожидающая отдаёт память
+  // сразу, а после выхода первой обе копии отсутствуют.
   func testClearingDuringPausedCoverRenderCannotRestoreTheCover() async throws {
     let fixture = try fixture()
     let budget = ImageByteBudget()
@@ -170,6 +188,8 @@ import XCTest
     XCTAssertNil(cache.frame(queuedKey))
   }
 
+  // Запускает два восстановления одной дисковой копии и сверяет общий рисунок и исходные пиксели.
+  // Затем проверяет, что третий запрос может взять этот кадр из памяти.
   func testConcurrentRestoresSharePixelsAndPromoteThemToMemory() async throws {
     let fixture = try fixture()
     let budget = ImageByteBudget()
@@ -208,6 +228,8 @@ import XCTest
     try await awaitReleased(budget)
   }
 
+  // Очищает кадры до выдачи ожидающему экрану. Запрос не публикует старый результат и освобождает
+  // подготовленные байты.
   func testClearBeforeDeliveryCancelsPublicationAndReleasesPixels() async throws {
     let fixture = try fixture()
     let budget = ImageByteBudget()
@@ -232,6 +254,8 @@ import XCTest
     try await awaitReleased(budget)
   }
 
+  // Задерживает чтение старой копии и сохраняет свежий отличимый кадр. После завершения диска в
+  // памяти остаётся более свежий результат.
   func testDiskCompletionDoesNotReplaceANewerCapturedFrame() async throws {
     let fixture = try fixture()
     let budget = ImageByteBudget()
@@ -277,6 +301,8 @@ import XCTest
     try await awaitReleased(budget)
   }
 
+  // Начинает чтение и отзывает исходник до выдачи. Ни экран, ни хранилище не должны получить
+  // отозванный кадр.
   func testDeletionAfterReadStartsCannotPublishRevokedCover() async throws {
     let fixture = try fixture()
     let budget = ImageByteBudget()
@@ -307,6 +333,8 @@ import XCTest
     try await awaitReleased(budget)
   }
 
+  // После выдачи кадра первому получателю очищает хранилище. Второй получатель должен проверить
+  // действительность заново и уже не получить устаревшие пиксели.
   func testFirstDeliveryClearingCacheCancelsOtherPendingOwners() async throws {
     let fixture = try fixture()
     let budget = ImageByteBudget()
@@ -339,6 +367,8 @@ import XCTest
     try await awaitReleased(budget)
   }
 
+  // Сохраняет больше четырёх небольших кадров в прежнем пределе памяти, затем добавляет большие.
+  // Проверяет вытеснение раннего кадра и сохранение заданного предела байтов.
   func testSmallCoversSurviveBeyondFourWithoutIncreasingPreviousByteCeiling() throws {
     let fixture = try fixture()
     let budget = ImageByteBudget()
@@ -351,6 +381,8 @@ import XCTest
       id: "cover", relativePath: "remote/cover.mp4", mime: "video/mp4",
       byteSize: 100, rawWidth: 64, rawHeight: 64, orientation: 1, durationMs: 3000,
       thumbnailKey: "cover")
+    // Делает отдельный ключ для каждого номера в опыте с разными размерами. Так добавление нового
+    // кадра проверяет рост и вытеснение вместо замены одной записи.
     func key(_ id: Int64) -> VideoPlaybackKey {
       VideoPlaybackKey(messageID: id, attachment: attachment)
     }
@@ -380,6 +412,8 @@ import XCTest
     XCTAssertEqual(budget.bytes, 0)
   }
 
+  // Вытесняет кадр из памяти и ставит раннюю подготовку перед возвращением ролика. Новый поиск
+  // получает те же пиксели сразу после подготовки.
   func testPreparationRestoresAnEvictedCoverBeforeItsNextVisibleLookup() async throws {
     let fixture = try fixture()
     let budget = ImageByteBudget()
@@ -417,6 +451,8 @@ import XCTest
     try await awaitReleased(budget)
   }
 
+  // Заполняет ограниченный набор описаний, а затем проверяет пониженный предел памяти. Старые
+  // копии освобождаются, даже если ограничение задано числом записей или байтами.
   func testMetadataAndReducedMemoryBudgetBothBoundRetainedCovers() throws {
     let fixture = try fixture()
     let budget = ImageByteBudget()

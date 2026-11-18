@@ -1,3 +1,6 @@
+// Сравниваем повторное чтение готового маленького кадра с новой подготовкой из исходных байтов.
+// Проверяем одинаковое изображение, объём временных файлов и экономию процессорного времени.
+
 import XCTest
 import UIKit
 import CryptoKit
@@ -12,6 +15,8 @@ import Darwin
   private struct Record: Decodable {
     let assetId: String, blobId: String, tinySHA256: String, tinyPreview: String
   }
+  // Считаем время текущего рабочего потока в приложении и системе. Это позволяет отделить работу
+  // от случайной задержки очереди.
   private nonisolated static func cpu() throws -> Double {
     var info = thread_basic_info_data_t(),
       count = mach_msg_type_number_t(
@@ -27,6 +32,8 @@ import Darwin
     return Double(info.user_time.seconds) + Double(info.system_time.seconds) + Double(
       info.user_time.microseconds + info.system_time.microseconds) / 1_000_000
   }
+  // Выводим кадр в общий формат четырёх цветовых каналов. После этого сохранённый и заново
+  // подготовленный рисунки можно сравнить по байтам.
   private nonisolated static func rgba(_ image: CGImage) throws -> Data {
     let context = try XCTUnwrap(
       CGContext(
@@ -36,6 +43,8 @@ import Darwin
     context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
     return Data(bytes: try XCTUnwrap(context.data), count: image.width * image.height * 4)
   }
+  // Проверяем подлинность кадров и готовим их во временном каталоге. Повторное чтение должно дать
+  // те же размеры и байты рисунка. После сравниваем затраты потока и объём файлов на диске.
   func testBoundedProductionCacheAgainstUncachedDisplayPreparation() async throws {
     let fixture = try XCTUnwrap(
       Bundle(for: RepositoryHarness.self).url(forResource: "fixtures", withExtension: nil)
@@ -79,6 +88,8 @@ import Darwin
               "pixelIdentical": true
             ])
           }
+          // Прогоняем одинаковый набор через повторное чтение либо полную подготовку и фактически
+          // рисуем каждый кадр. Считаем время и число обработанных точек.
           func batch(_ raw: Bool, loops: Int) throws -> [String: Double] {
             let sink = try XCTUnwrap(
               CGContext(
@@ -122,6 +133,9 @@ import Darwin
           let bytes = try files.reduce(0) {
             try $0 + ($1.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)
           }
+          // Берём середину замеров для каждого пути, чтобы крайнее измерение не исказило
+          // отношение. После сравнения готовый рисунок должен укладываться в заданную долю
+          // времени подготовки.
           func median(_ values: [Double]) -> Double {
             let sorted = values.sorted()
             return (sorted[sorted.count / 2 - 1] + sorted[sorted.count / 2]) / 2

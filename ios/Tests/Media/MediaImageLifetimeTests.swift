@@ -1,16 +1,27 @@
+// Проверки времени жизни изображений в ленте на айфоне. Они следят за чёткостью при возврате, за
+// работой альбомов и за тем, чтобы прокрутка и клавиатура не заставляли повторно рисовать
+// готовое.
+
 import XCTest
 import UIKit
 @testable import Kandinsky
 @MainActor final class MediaImageLifetimeTests: XCTestCase {
+  // Задерживаем чтение сохранённого фото и наблюдаем первый кадр после возврата. До готовности
+  // чёткого изображения расплывчатая картинка не должна мелькнуть и передача с сервера не должна
+  // начаться.
   func testLocalPhotoReturnPrefersSavedPixelsOverInlineBlur() async throws {
     final class LocalFile: MediaFileProvider, @unchecked Sendable {
       let url: URL
       let requested: XCTestExpectation
       let release = DispatchSemaphore(value: 0)
+      // Запоминаем путь к местному фото и сигнал начала чтения. Проверка сможет удержать
+      // получение файла в нужный момент.
       init(_ url: URL, _ requested: XCTestExpectation) {
         self.url = url
         self.requested = requested
       }
+      // Сообщаем, что местный путь запрошен, и ждём разрешения чтения. Затем возвращаем
+      // подготовленный файл, чтобы не смешивать местную работу с сетью.
       func cached(_ attachment: Attachment, preview: Bool, token: MediaCancellation) throws
         -> (URL, String)?
       {
@@ -18,6 +29,8 @@ import UIKit
         _ = release.wait(timeout: .now() + 4)
         return (url, "image/jpeg")
       }
+      // Считаем обращение за сетевым файлом ошибкой проверки. Сохранённое фото должно открываться
+      // через местный путь.
       func resolve(_ attachment: Attachment, preview: Bool, token: MediaCancellation) throws
         -> (URL, String)
       {
@@ -58,6 +71,8 @@ import UIKit
     slot.close(); media.close(); try await h.close()
   }
 
+  // Задерживаем проверку местного видео и убеждаемся, что кнопки отмены ещё нет. При
+  // действительной передаче кнопка появляется и позволяет остановить запрос.
   func testVideoTransferControlWaitsForActualNetworkProgress() async throws {
     let h = try await RepositoryHarness.open()
     let media = MediaStore(store: h.store)
@@ -94,6 +109,8 @@ import UIKit
     try await h.close()
   }
 
+  // Готовим пять разных рисунков и проверяем цвет каждой ячейки. При сдвиге остаётся прежняя
+  // запись текста. После ухода альбом освобождает все кадры и их память.
   func testAlbumPaintsEveryNativeImageAndRetiresAllLeasesOutsideViewport() async throws {
     let h = try await RepositoryHarness.open(),
       media = MediaStore(store: h.store)
@@ -173,6 +190,8 @@ import UIKit
     XCTAssertEqual(media.bytesUsed, 0)
     try await h.close()
   }
+  // Для нескольких ширин и числа файлов проверяем число и границы прямоугольников. Порядок и
+  // отсутствие наложений дают открыть нужное вложение касанием.
   func testEveryAlbumAttachmentHasAnOrderedNonOverlappingHitRectangle() {
     for count in 2...10 {
       for width in [160, 260, 340] {
@@ -214,18 +233,24 @@ import UIKit
       defer { lock.unlock() }
       return (started, cancelled)
     }
+    // Увеличиваем счётчик начатых чтений под блокировкой. Источник работает в фоне, а проверки
+    // читают число на экране.
     func begin() {
       lock.lock()
       started += 1
       lock.unlock()
     }
+    // Записываем число отменённых чтений под той же защитой. Так можно отличить реальную отмену
+    // работы от одного исчезновения картинки.
     func cancel() {
       lock.lock()
       cancelled += 1
       lock.unlock()
     }
   }
-  /// Переход через область стекла не должен менять узел сообщения и повторно рисовать текст.
+  // Двигаем готовую строку из области за экраном к видимой границе и обратно. Фото допускается
+  // только рядом с экраном, а при уходе прерывается фактическое чтение. Текстовый узел при этом
+  // сохраняется.
   func testPreparedOffscreenPhotoDoesNotDecodeUntilItEntersTheFullViewport() async throws {
     let h = try await RepositoryHarness.open(),
       media = MediaStore(store: h.store), reads = Reads()
@@ -320,6 +345,8 @@ import UIKit
     prepared.close()
     try await h.close()
   }
+  // Показываем фото, открываем поле ввода и накладываем поверх просмотр. Слой чёткого снимка
+  // должен оставаться на прежнем месте за клавиатурой и прозрачной подложкой.
   func testOpeningLocalKeyboardKeepsTheVisiblePhotoAttached() async throws {
     let h = try await RepositoryHarness.open(),
       media = MediaStore(store: h.store),
@@ -354,6 +381,8 @@ import UIKit
       previous?.makeKey()
     }
     try await chrome.openHistory(repository: h.repo, anchor: nil)
+    // Обходим вложенные слои, пока не найдём слои сообщений. Проверке нужен именно владелец
+    // кадра, даже если он находится внутри другой подложки.
     func nodes(_ layer: CALayer) -> [MessageLayer] {
       (layer.sublayers ?? []).flatMap { ($0 as? MessageLayer).map { [$0] } ?? nodes($0) }
     }
@@ -393,6 +422,8 @@ import UIKit
     await state.close()
     try await h.close()
   }
+  // Подготавливаем фото с подписью и проверяем, что текст находится ниже вложения. После сдвига
+  // готовый рисунок остаётся прежним, а непрозрачный просмотр убирает кадры под ним.
   func testVisiblePhotoUsesNativeMailboxAndScrollingDoesNotRecordTextAgain() async throws {
     let h = try await RepositoryHarness.open()
     let media = MediaStore(store: h.store)
@@ -417,7 +448,8 @@ import UIKit
     let ready = expectation(description: "real decoded frame published")
     ready.assertForOverFulfill = false
     scene.onImageReady = { if scene.imageReady(row.id) { ready.fulfill() } }
-    /// Меняется только положение, чтобы отдельно проверить повторное использование рисунка.
+    // Формируем снимок сцены с одной строкой в переданной вертикальной точке. Сдвигая его, можно
+    // наблюдать тот же ресурс без новой разметки.
     func snapshot(_ y: CGFloat) -> SceneSnapshot {
       SceneSnapshot(
         ticket: scene.ticket,

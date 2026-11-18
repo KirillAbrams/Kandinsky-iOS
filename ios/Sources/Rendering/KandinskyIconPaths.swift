@@ -1,3 +1,6 @@
+// Здесь хранятся контуры кнопок переписки на айфоне. Контур строится один раз. Кнопка применяет
+// цвет, размер и область нажатия при каждом показе.
+
 import UIKit
 enum IconID: CaseIterable, Hashable {
   case menu, compose, chevronDown, tune, plus, send, stop
@@ -6,6 +9,8 @@ enum KandinskyIconPaths {
   private static let paths: [IconID: CGPath] = Dictionary(
     uniqueKeysWithValues: IconID.allCases.map { icon in
       let p = CGMutablePath()
+      // Начинаем линию первой парой координат и ведём через остальные пары. Без пары точек
+      // видимого отрезка не получится.
       func line(_ values: [CGFloat]) {
         guard values.count >= 4 else { return }
         p.move(to: CGPoint(x: values[0], y: values[1]))
@@ -57,6 +62,9 @@ enum KandinskyIconPaths {
       }
       return (icon, p.copy()!)
     })
+  // Переводим контур в заданный прямоугольник и выбираем заливку или обводку по виду значка.
+  // После рисунка возвращаем параметры холста, чтобы следующая кнопка не унаследовала его
+  // масштаб.
   static func draw(_ icon: IconID, in rect: CGRect, color: UIColor, width: CGFloat = 1.8) {
     guard let context = UIGraphicsGetCurrentContext(), let path = paths[icon] else { return }
 
@@ -79,6 +87,7 @@ enum KandinskyIconPaths {
   }
 }
 @MainActor final class KandinskyIconButton: UIControl {
+  // После смены значка обновляем рисунок кнопки. Например, место отправки занимает остановка.
   var icon: IconID { didSet { if icon != oldValue { setNeedsDisplay() } } }
   var iconColor: UIColor = .darkGray
   var iconHidden = false
@@ -87,6 +96,8 @@ enum KandinskyIconPaths {
   var solidColor = KandinskyPalette.blue
   var circle = true
   var hitExtension: CGFloat = 0
+  // Связываем кнопку со значком и подписью доступности. События касания просят новый кадр, чтобы
+  // нажатие сразу меняло вид.
   init(icon: IconID, id: String, label: String) {
     self.icon = icon
     super.init(frame: .zero)
@@ -99,22 +110,34 @@ enum KandinskyIconPaths {
       self, action: #selector(feedback),
       for: [.touchDown, .touchUpInside, .touchCancel, .touchDragExit])
   }
+  // Принимаем значок и подпись при создании из кода. У сохранённой разметки нужных параметров
+  // нет.
   required init?(coder: NSCoder) { fatalError("Use programmatic initializer") }
+  // Просим перерисовать кнопку при нажатии и отпускании. Так выделенное состояние пропадает после
+  // завершения касания.
   @objc private func feedback() { setNeedsDisplay() }
   override var accessibilityFrame: CGRect {
+    // Если область касания расширена, переводим её в экранные координаты и для озвучивания. В
+    // обычном случае достаточно системной рамки.
     get {
       guard hitExtension > 0 else { return super.accessibilityFrame }
       let target = bounds.insetBy(dx: -hitExtension, dy: -hitExtension)
       return UIAccessibility.convertToScreenCoordinates(target, in: self)
     }
+    // Передаём явно заданную рамку системе. При обычной кнопке она остаётся источником координат
+    // доступности.
     set { super.accessibilityFrame = newValue }
   }
 
+  // Проверяем расширенный прямоугольник для маленьких кнопок. Значок может остаться компактным, а
+  // нажать рядом с ним всё ещё можно.
   override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
     guard hitExtension > 0 else { return super.point(inside: point, with: event) }
     return bounds.insetBy(dx: -hitExtension, dy: -hitExtension).contains(point)
   }
 
+  // Рисуем круг или обводку и помещаем значок по центру. При нажатии меняем прозрачность заливки,
+  // а у скрытого значка оставляем область пустой.
   override func draw(_ rect: CGRect) {
     guard !iconHidden else { return }
     let side = min(bounds.width, bounds.height) - 7

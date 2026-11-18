@@ -1,3 +1,6 @@
+// Раздаёт места тихим роликам, большому проигрывателю и камере. Запрашивает остановку
+// конкурирующей работы и ждёт подтверждения перед выдачей следующего места.
+
 import Foundation
 
 @MainActor final class MediaAdmission: CaptureAdmission {
@@ -5,6 +8,8 @@ import Foundation
     let id = UUID(), kind: CaptureKind, token: MediaCancellation,
       completion: (Result<CaptureLease, Error>) -> Void
     var stopped = false, scheduled = false
+    // Запоминает вид съёмки, отмену и получателя права. Так ожидающую камеру можно снять, не
+    // останавливая чужой запрос.
     init(
       _ kind: CaptureKind, _ token: MediaCancellation,
       _ completion: @escaping (Result<CaptureLease, Error>) -> Void
@@ -17,6 +22,8 @@ import Foundation
   private final class PendingPlayback {
     let id: UUID, token: MediaCancellation, completion: (Result<PlaybackLease, Error>) -> Void
     var scheduled = false
+    // Собирает номер, отмену и ответ для ожидающего проигрывателя. По номеру узнаётся тот же
+    // запрос после остановки тихих роликов.
     init(
       _ id: UUID, _ token: MediaCancellation,
       _ completion: @escaping (Result<PlaybackLease, Error>) -> Void
@@ -34,6 +41,8 @@ import Foundation
   static var previewsAllowed: Bool {
     processPlayback == nil && processCapture == nil && processPendingCapture == nil
   }
+  // Даёт тихому ролику место только при свободной камере и большом проигрывателе, соблюдая
+  // предел. Возврат последнего места разрешает продолжить ожидающую общую операцию.
   static func reservePreview(studioAlbum: Bool = false, stop: @escaping () -> Void)
     -> PlaybackLease?
   {
@@ -48,20 +57,32 @@ import Foundation
       }
     }
   }
+  // Запоминает получателя уведомления под отдельным номером. Строка сможет попросить показ снова,
+  // когда конкурирующая работа освободится.
   static func observePreviewAvailability(_ action: @escaping () -> Void) -> UUID {
     let id = UUID()
     observers[id] = action
     return id
   }
+  // Удаляет подписку по номеру. Ушедшая строка больше не должна просыпаться при возвращении
+  // места.
   static func removePreviewObserver(_ id: UUID) { observers.removeValue(forKey: id) }
   /// Обходит копию списка, чтобы обработчики могли менять свои подписки во время вызова.
+  // Вызывает подписчиков только когда места снова можно выдавать и обходит копию списка. Один
+  // получатель может отписаться, не мешая соседям.
   private static func notifyPreviewAvailability() {
     guard previewsAllowed else { return }
     for action in Array(observers.values) { action() }
   }
   /// Остановка видео может удалить его из списка. Обходим копию, чтобы остановить и остальные.
+  // Просит все тихие просмотры остановиться и перебирает копию действий. Остановка может изменить
+  // список прямо при вызове.
   private static func stopPreviews() { for stop in Array(previews.values) { stop() } }
+  // Снимает ожидание, только если номер относится к уходящему запросу. Иначе старый отказ мог бы
+  // убрать сигнал для другого ожидающего.
   private static func clearDrain(_ id: UUID) { if drain?.0 == id { drain = nil } }
+  // Выполняет возврат места в потоке экрана или ставит его туда из фона. Список владельцев
+  // меняется в одном потоке.
   nonisolated private static func releaseOnMain(_ action: @escaping @MainActor () -> Void) {
     if Thread.isMainThread {
       MainActor.assumeIsolated { action() }
@@ -75,10 +96,14 @@ import Foundation
   var playbackActiveCount: Int { playbackID == nil ? 0 : 1 }
   var captureActiveCount: Int { captureID == nil ? 0 : 1 }
   /// После закрытия владельца новый обработчик не устанавливается.
+  // Запоминает способ остановить текущий большой просмотр перед камерой. После закрытия такого
+  // владельца новое действие не устанавливается.
   func installPlaybackStopper(_ stop: @escaping (@escaping () -> Void) -> Void) {
     guard !closed else { return }
     stopper = stop
   }
+  // Возвращает отказ отложенно, пока есть возможность снять сам запрос. Завершение и отмена не
+  // должны отдать два ответа.
   private func rejected<T>(_ error: MediaError, _ completion: @escaping (Result<T, Error>) -> Void)
     -> MediaCancellation
   {
@@ -87,6 +112,8 @@ import Foundation
     DispatchQueue.main.async { if token.finish() { completion(.failure(error)) } }
     return token
   }
+  // Проверяет занятость камеры и общего места, записывает ожидание и останавливает тихие ролики.
+  // Если запрос отменят, возвращает место и пробует продолжить съёмку.
   @discardableResult func requestPlayback(
     completion: @escaping (Result<PlaybackLease, Error>) -> Void
   ) -> MediaCancellation {
@@ -117,6 +144,8 @@ import Foundation
     tryGrantPlayback()
     return token
   }
+  // Ждёт ухода всех тихих просмотров и отсутствие ожидающей камеры перед выдачей права. Возврат
+  // выданного места снова разрешает ожидание и тихий показ.
   private func tryGrantPlayback() {
     guard !closed, pendingCapture == nil, Self.previews.isEmpty, let p = pendingPlayback,
       !p.scheduled
@@ -149,6 +178,8 @@ import Foundation
       }
     }
   }
+  // Запоминает запрос на камеру, останавливает тихие ролики и просит закрыть свой большой
+  // проигрыватель. Отмена снимает только ожидающее право, не меняя чужого владельца.
   @discardableResult func acquire(
     _ kind: CaptureKind, completion: @escaping (Result<CaptureLease, Error>) -> Void
   ) -> MediaCancellation {
@@ -195,6 +226,8 @@ import Foundation
   }
   /// Выдаёт ожидающее разрешение записи только после подтверждения остановки и освобождения конкурирующих
   /// владельцев.
+  // Выдаёт камеру после подтверждения остановки и ухода всех проигрывателей. Право возвращается
+  // по номеру, чтобы позднее закрытие не снимало другую съёмку.
   private func tryGrant() {
     guard !closed, playbackID == nil, Self.processPlayback == nil, Self.processCapture == nil,
       Self.previews.isEmpty,
@@ -228,6 +261,8 @@ import Foundation
       }
     }
   }
+  // Помечает владельца закрытым и снимает ожидающие запросы и текущий просмотр. Иначе экран мог
+  // бы получить право после ухода.
   func close() {
     guard !closed else { return }
     closed = true
@@ -241,25 +276,37 @@ import Foundation
 
 @MainActor final class PreviewLifetime {
   private var lease: PlaybackLease?, work = 0, retired = false
+  // Сохраняет право тихого ролика до конца его открытия или остановки. Выдача нового места
+  // зависит от того, успел ли старый владелец выйти.
   init(_ lease: PlaybackLease) { self.lease = lease }
+  // Отмечает начало ещё одной работы внутри просмотра. Закрытое право больше не должно запускать
+  // работу.
   func begin() {
     precondition(!retired)
     work += 1
   }
+  // Уменьшает число незаконченных операций и пробует вернуть место. Без этого подготовка могла бы
+  // удержать камеру после завершения.
   func end() {
     precondition(work > 0)
     work -= 1
     releaseIfRetired()
   }
+  // Помечает просмотр завершённым, оставляя его место до окончания фоновой работы. Другой ролик
+  // не начнёт работу поверх ещё живого ресурса.
   func retire() {
     retired = true
     releaseIfRetired()
   }
+  // Возвращает право, только когда просмотр снят и работ больше нет. Затем убирает ссылку, чтобы
+  // повтор не вернул место снова.
   private func releaseIfRetired() {
     if retired && work == 0 {
       lease?.release()
       lease = nil
     }
   }
+  // Возвращает оставшееся право при освобождении объекта. Закрытый просмотр больше не занимает
+  // место в общем списке.
   deinit { lease?.release() }
 }

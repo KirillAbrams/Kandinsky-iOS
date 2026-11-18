@@ -1,3 +1,6 @@
+// Готовит лёгкую копию фото или видео для отправки. Оригинал остаётся отдельным файлом, а номер
+// копии нужен, чтобы повтор загрузки после обрыва пришёл к той же записи.
+
 import AVFoundation
 import CryptoKit
 import Foundation
@@ -5,7 +8,8 @@ import ImageIO
 import UniformTypeIdentifiers
 
 enum NetworkPreview {
-  /// Вычисляет постоянный номер передачи из номера вложения, чтобы повтор относился к той же копии.
+  /// Пропускает неподдерживаемые вложения, делает уменьшенный кадр и вычисляет номер его отправки
+  /// из номера оригинала. Передаёт номер родителя, чтобы сервер хранил и убирал связанные файлы вместе.
   nonisolated static func upload(
     root: URL, attachment a: AttachmentDraft, api: NetworkAPI, parent: String? = nil
   )

@@ -1,6 +1,11 @@
+// Находит активное задание и передаёт действия над одним запросом или результатом. Перед
+// отправкой сопоставляет местный номер с номером сервера.
+
 import Foundation
 
 extension NetworkSync {
+  // Ищет самое свежее входящее сообщение чата со статусом ожидания или работы. По этой строке
+  // экран выбирает, какой генерации показать управление.
   func activeGeneration(chat: Int64) async throws -> MessageID? {
     try await store.perform { db in
       // Обе платформы сохраняют дополнительные данные в одинаковой компактной записи
@@ -15,6 +20,8 @@ extension NetworkSync {
       ).first?["id"]?.optionalInt
     }
   }
+  // Читает номер сервера только для сообщения указанного чата и ещё открытого сеанса. Без сверки
+  // действие могло бы обратиться не к той строке.
   private func generationPath(chat: Int64, message: MessageID) async throws -> String {
     guard !closed else { throw RepoError.io }
     let serverID = try await store.perform { db in
@@ -26,6 +33,9 @@ extension NetworkSync {
     guard let serverID, !closed else { throw RepoError.notFound }
     return "/v1/kandinsky/threads/\(chat)/generations/\(serverID)"
   }
+  // Выбирает удаление всего запроса или конкретного файла и проверяет допустимый номер файла.
+  // После успеха просит перечитать чат, если соединение открыто, чтобы экран быстрее увидел
+  // очистку.
   func deleteGenerationContent(chat: Int64, message: MessageID, blob: String?) async throws {
     let path = try await generationPath(chat: chat, message: message)
     if let blob, !RemoteMediaLocation.validBlobID(blob) { throw RepoError.invalidInput }
@@ -33,11 +43,16 @@ extension NetworkSync {
     _ = try await api.json(path + "?" + query, method: "DELETE")
     if resumed, !closed { try? await send(["type": "kandinsky.open", "chatId": chat]) }
   }
+  // Отправляет выбранную причину по проверенному адресу задания. Жалоба должна относиться к
+  // результату сервера, поэтому местный номер сначала переводится.
   func reportGeneration(chat: Int64, message: MessageID, reason: StudioReportReason) async throws {
     let path = try await generationPath(chat: chat, message: message)
     _ = try await api.json(
       path + "/report", body: JSONEncoder().encode(["reason": reason.rawValue]))
   }
+  // Собирает действие, номер попытки и выбранного результата, при полном повторе сохраняет номер
+  // до отправки. Ответ пишет в базу перед выдачей экрану, чтобы потеря ответа не привела к новой
+  // работе.
   func generationAction(
     chat: Int64, message: MessageID, action: StudioGenerationAction, operation: UUID?,
     slot: StudioGeneration.Slot? = nil

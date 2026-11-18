@@ -1,6 +1,11 @@
+// Проверяет открытие двух исходных историй на айфоне через обычный список. Использует уже
+// открытый проверочный вход.
+
 import XCTest
 
 final class AccountLiveUITests: XCTestCase {
+  // Запускает приложение и по очереди открывает обе истории по названию. Ждёт поле ввода после
+  // каждого нажатия, а без готового входа пропускает проверку.
   func testAccountCanOpenBothOriginalHistories() throws {
     let app = XCUIApplication()
     app.launch()

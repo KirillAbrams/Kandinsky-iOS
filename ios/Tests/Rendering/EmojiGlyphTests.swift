@@ -1,7 +1,12 @@
+// Проверяем, что составной семейный знак остаётся цветным после подготовки и рисования сообщения
+// в чате.
+
 import XCTest
 import UIKit
 @testable import Kandinsky
 @MainActor final class EmojiGlyphTests: XCTestCase {
+  // Рисуем готовый блок и считаем пиксели с заметной разницей цветовых каналов. Размер текста
+  // сам по себе не показал бы, что вместо цветного знака вышел пустой квадрат.
   func testZWJFamilyDrawsActualColoredGlyphPixels() {
     let message = Message(
       id: 1, chatID: 2, order: OrderKey(sortKey: 1, messageID: 1), direction: .incoming,

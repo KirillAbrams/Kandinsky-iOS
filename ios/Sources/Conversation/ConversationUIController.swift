@@ -1,3 +1,6 @@
+// Собирает действия для выбранного сообщения или результата генерации. Запрашивает подтверждение
+// удаления и не запускает два действия над одной строкой одновременно.
+
 import UIKit
 
 enum MessageAction { case copy }
@@ -11,6 +14,8 @@ enum MessageAction { case copy }
   var reportGeneration: ((MessageID, StudioReportReason) async throws -> Void)?
   private let state: ConversationState
   private var generationActionsInFlight = Set<MessageID>()
+  // Подключает исполнителя действий к текущему чату и передаёт изменения владельцу экрана. Это
+  // обновляет видимую историю после местной записи.
   init(
     parent: UIView, chatID: ChatID, repository: ChatRepository, state: ConversationState,
     onDelta: @escaping (MessageDelta) -> Void
@@ -28,14 +33,20 @@ enum MessageAction { case copy }
     }
     return nil
   }
+  // Разрешает отменить только своё ожидающее или неудавшееся сообщение. Для принятого запроса
+  // требуется отдельное удаление результата или текста.
   private func canCancel(_ message: Message) -> Bool {
     message.direction == .outgoing && [.pending, .failed].contains(message.delivery)
   }
+  // Передаёт копирование в хранилище действий и показывает ошибку при отказе. Экран не работает с
+  // буфером напрямую здесь.
   func perform(_ kind: MessageAction, message: Message) {
     switch kind {
     case .copy: Task { do { _ = try await actions.copy(id: message.id) } catch { failed(error) } }
     }
   }
+  // Показывает уточнение перед отменой незавершённой отправки. Только подтверждение уберёт её из
+  // истории и повтора.
   private func confirmPendingRemoval(_ message: Message) {
     let alert = UIAlertController(
       title: "Отменить отправку?", message: "Этот запрос не будет отправлен повторно.",
@@ -50,6 +61,8 @@ enum MessageAction { case copy }
       })
     presenter?.present(alert, animated: true)
   }
+  // Подбирает копирование, отмену и удаление для своего запроса или причины жалобы для входящего
+  // файла. Для одного результата повторная жалоба ждёт завершения первой.
   func menu(message: Message) {
 
     if message.direction == .outgoing {
@@ -93,6 +106,8 @@ enum MessageAction { case copy }
     return
 
   }
+  // Просит постоянный номер повтора и отправляет действие для конкретного результата. Снимает
+  // отметку ожидания по завершении даже при ошибке.
   func retrySlot(_ message: MessageID, slot: StudioGeneration.Slot) {
     guard let retrySlotAction, let operation = state.beginSlotRetry(slot) else {
       return
@@ -102,7 +117,8 @@ enum MessageAction { case copy }
       do { try await retrySlotAction(message, slot, operation) } catch { self?.failed(error) }
     }
   }
-  // Один запрос на удаление может прийти с нескольких устройств.
+  // Отправляет удаление запроса или отдельного файла с указанным номером. Пока ответ не пришёл,
+  // такое же действие по строке не отправляется снова.
   func removeGenerationContent(_ message: MessageID, blob: String?) {
     guard let deleteGenerationContent, generationActionsInFlight.insert(message).inserted else {
       return
@@ -113,6 +129,8 @@ enum MessageAction { case copy }
       do { try await deleteGenerationContent(message, blob) } catch { self.failed(error) }
     }
   }
+  // Просит согласие на удаление текста запроса и результатов и лишь потом передаёт операцию
+  // службе. Случайное нажатие на меню ничего не удалит.
   private func confirmPromptRemoval(_ message: Message) {
     let alert = UIAlertController(
       title: "Удалить запрос?", message: "Запрос и его результаты исчезнут на всех устройствах.",
@@ -124,6 +142,8 @@ enum MessageAction { case copy }
       })
     presenter?.present(alert, animated: true)
   }
+  // Вызывает проверку, отмену или повтор через службу и держит строку занятой до ответа. Второе
+  // нажатие не создаёт второй запрос.
   func performGenerationAction(_ id: MessageID, action: StudioGenerationAction) {
     guard let generationAction, generationActionsInFlight.insert(id).inserted else { return }
     Task { [weak self] in
@@ -134,10 +154,14 @@ enum MessageAction { case copy }
       } catch { self.failed(error) }
     }
   }
+  // Закрывает ввод с клавиатуры и показывает команды на панели. Иначе клавиатура могла бы скрыть
+  // часть действий.
   private func sheet(_ title: String? = nil, _ items: [KandinskySheetAction]) {
     parent?.endEditing(true)
     presenter?.present(KandinskyActionSheet(title: title, items: items), animated: true)
   }
+  // Показывает подсказку о неудачном действии и возможности повтора. Сама обработка отказа не
+  // переписывает историю.
   private func failed(_ error: Error) {
     let alert = UIAlertController(
       title: "Действие не выполнено",
@@ -146,6 +170,8 @@ enum MessageAction { case copy }
     alert.addAction(UIAlertAction(title: "Понятно", style: .cancel))
     presenter?.present(alert, animated: true)
   }
+  // Показывает итог жалобы только в видимом свободном окне. Запоздалый ответ не открывает
+  // сообщение поверх другой панели.
   private func reportFeedback(_ title: String, _ detail: String?) {
     guard parent?.window != nil, let presenter, presenter.presentedViewController == nil else {
       return

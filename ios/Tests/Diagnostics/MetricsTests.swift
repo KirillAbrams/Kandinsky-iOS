@@ -1,7 +1,12 @@
+// Проверяет запись ограниченных замеров и отделение времени экрана от положения ленты. Сценарии
+// используют отдельные временные отчёты.
+
 import XCTest
 import UIKit
 @testable import Kandinsky
 @MainActor final class MetricsTests: XCTestCase {
+  // Включает только сверку часов, запускает и закрывает наблюдение. Проверяет наличие меток без
+  // положений и обычного числового отчёта.
   func testClockOnlyDiagnosticDoesNotSamplePositionsOrEnableOrdinaryMetrics() async throws {
     let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString),
       numeric = folder.appendingPathComponent("latest.json"),
@@ -45,6 +50,8 @@ import UIKit
     XCTAssertFalse(MetricsRuntime.enabled)
     XCTAssertFalse(FileManager.default.fileExists(atPath: numeric.path))
   }
+  // Создаёт движение и превышает предел записей, затем читает отчёт. Сверяет порядок времени,
+  // события, позиции и число отброшенных замеров.
   func testNativeMotionDiagnosticExportsPositionsWithBoundedStorage() async throws {
     let h = try await RepositoryHarness.open()
     try await h.store.perform { db in
@@ -138,6 +145,8 @@ import UIKit
     )
     try await h.close()
   }
+  // Двигает слой и сравнивает положение, которое хранит лента, с тем, которое показывает
+  // системная анимация. Отчёт должен сохранить оба значения отдельно.
   func testMotionDiagnosticSeparatesModelFromNativePresentation() async throws {
     let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString),
       previousEnabled = MetricsRuntime.enabled, previousOutput = MetricsRuntime.output
@@ -197,6 +206,8 @@ import UIKit
       "The actual CA presentation must be sampled separately; repeating model offset cannot diagnose visual timing"
     )
   }
+  // Запускает наблюдатель без разрешения диагностики и проверяет отсутствие файла. Обычное
+  // открытие чата не должно писать отчёты.
   func testDisabledMotionDiagnosticWritesNoFile() async throws {
     let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString),
       previousEnabled = MetricsRuntime.enabled, previousOutput = MetricsRuntime.output
@@ -217,6 +228,8 @@ import UIKit
       FileManager.default.fileExists(atPath: folder.path),
       "An ordinary launch must not create motion files or a diagnostic output directory")
   }
+  // Освобождает область прокрутки во время наблюдения и проверяет слабую ссылку. Таймер не должен
+  // держать ушедший экран в памяти.
   func testMotionDiagnosticDoesNotRetainItsScrollView() async throws {
     let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString),
       previousEnabled = MetricsRuntime.enabled, previousOutput = MetricsRuntime.output
@@ -247,6 +260,8 @@ import UIKit
       FileManager.default.fileExists(atPath: file.path),
       "Closing a probe after its weak target is gone must still finish its bounded report")
   }
+  // Включает только запись движения и проверяет появление её файла. Обычные числовые замеры и их
+  // отчёт остаются выключены.
   func testNarrowMotionFlagDoesNotEnableOrdinaryMetrics() async throws {
     let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString),
       numeric = folder.appendingPathComponent("latest.json"),
@@ -283,6 +298,8 @@ import UIKit
       FileManager.default.fileExists(atPath: numeric.path),
       "No ordinary metrics export should accompany the narrow motion probe")
   }
+  // Добавляет десять длительностей в ряд из четырёх мест. Проверяет общий счёт, середину и
+  // порядок оставшихся значений.
   func testBoundedNumericStatistics() {
     let r = MetricsRecorder(capacity: 4)
     for x in 1...10 { r.record("scene_cpu_ms", milliseconds: Double(x)) }

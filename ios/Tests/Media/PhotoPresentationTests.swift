@@ -1,15 +1,22 @@
+// Сверяет координаты изображения при повороте, отражении и заполнении рамки. Неверные размеры и
+// ориентации должны получать отказ.
+
 import CoreGraphics
 import XCTest
 
 @testable import Kandinsky
 
 extension PhotoPresentation {
+  // Применяет преобразование к выбранной точке. Проверка может сравнить углы и внутренние
+  // координаты с независимыми значениями.
   fileprivate func point(x: Double, y: Double) -> CGPoint {
     CGPoint(x: x, y: y).applying(affineTransform)
   }
 }
 
 final class PhotoPresentationTests: XCTestCase {
+  // Проверяет попадание большого исходника в высокую рамку до и после поворота. Края выходят за
+  // рамку симметрично, а высота заполнена точно.
   func testOriginal2048FillsViewportWithCenteredCrop() throws {
     let p = try XCTUnwrap(
       PhotoPresentation.filling(
@@ -26,6 +33,8 @@ final class PhotoPresentationTests: XCTestCase {
     XCTAssertEqual(rotated.point(x: 2048, y: 1536).x, -121.5, accuracy: 0.001)
     XCTAssertEqual(rotated.point(x: 2048, y: 1536).y, 844, accuracy: 0.001)
   }
+  // Сверяет четыре точки для каждой из восьми ориентаций, проверяет кадрирование и неверные
+  // числа. Повтор одинакового запроса должен дать одинаковые координаты.
   func testSourceOrientationAndValidationContract() {
     let expected: [[[Double]]] = [
       [[16, 8], [48, 8], [16, 24], [48, 24]], [[48, 8], [16, 8], [48, 24], [16, 24]],
@@ -71,6 +80,8 @@ final class PhotoPresentationTests: XCTestCase {
         fill)
     }
   }
+  // Проверяет положение угла прямоугольного снимка после поворота в квадрате. Так можно поймать
+  // ошибку переноса даже при верном масштабе.
   func testRotationSixFillsSquare() throws {
     let p = try XCTUnwrap(
       PhotoPresentation.filling(

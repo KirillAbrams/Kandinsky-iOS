@@ -1,3 +1,7 @@
+// Карточка генерации на айфоне размечает ячейки результата и рисует очередь, ошибки и доступный
+// повтор. Изменяющиеся проценты живут на отдельном слое. Поэтому при новом числе не надо заново
+// рисовать всю карточку.
+
 import UIKit
 import CoreText
 
@@ -15,8 +19,12 @@ struct StudioGenerationCard {
 
   let cells: [Cell]
   let resultFrames: [CGRect]
+  // Список ячеек означает, что карточка хранит отдельные результаты даже при одном файле.
   var isBatch: Bool { !cells.isEmpty }
+  // Отдаём только ячейки, у которых этап допускает самостоятельный повтор.
   var retryCells: [Cell] { cells.filter { $0.slot.canRetry } }
+  // Возвращаем выполняющиеся ячейки. Для одиночного запроса без списка подготавливаем одну рамку
+  // с общим процентом.
   var runningCells: [Cell] {
     if isBatch { return cells.filter { $0.slot.status == .running } }
     guard generation.stage == .running, let imageFrame else { return [] }
@@ -26,6 +34,8 @@ struct StudioGenerationCard {
         frame: imageFrame)
     ]
   }
+  // Проверяем, что размеры, этап и ячейки не поменяли постоянный рисунок. Число процентов не
+  // входит в сравнение, потому что его обновляет отдельный индикатор.
   func sameStaticInk(as old: Self) -> Bool {
     guard imageFrame != nil, imageFrame == old.imageFrame, height == old.height,
       generation.stage == old.generation.stage, cells.count == old.cells.count
@@ -46,7 +56,8 @@ struct StudioGenerationCard {
   private let failureLines: [CTLine]
   private let failureLineHeight: CGFloat
 
-  /// Связывает вложения с ячейками по сохранённым обозначениям, чтобы фотографии занимали свои места.
+  // Раскладываем ячейки по пропорциям и связываем готовые файлы с ними по сохранённому ключу. Для
+  // ошибки без ячеек измеряем текст и добавляем повтор, когда он разрешён.
   init(_ generation: StudioGeneration, message: Message, key: TextLayoutKey, time: String) {
     self.generation = generation
     self.time = time
@@ -126,6 +137,8 @@ struct StudioGenerationCard {
     }
   }
 
+  // Даём короткую подпись каждому этапу. Во время работы показываем допустимые проценты, а без
+  // известного числа оставляем слово о ходе генерации.
   static func progressLabel(_ stage: StudioGeneration.Stage, _ progress: Int?) -> String {
     switch stage {
     case .queued: return "В очереди, 0%"
@@ -136,7 +149,8 @@ struct StudioGenerationCard {
     }
   }
 
-  /// Плавное изменение процентов выполняется другим элементом, поэтому здесь не запускается анимация.
+  // Рисуем неподвижные рамки ячеек либо сообщение об ошибке со временем и действием. Текущий
+  // процент ведётся отдельно и не требует повторной записи этого рисунка.
   func drawStatic(_ context: CGContext) {
     if let frame = imageFrame {
       if isBatch {
@@ -184,8 +198,8 @@ struct StudioGenerationCard {
       midY: height - 13, context: context)
   }
 
-  /// У выполняемой и завершённой генерации оставляет только фон, поскольку проценты и готовое медиа
-  /// показываются отдельно.
+  // Рисуем фон ячейки и в зависимости от этапа очередь, отмену или ошибку с повтором. Выполняемая
+  // и готовая ячейка получают только фон под движением или файлом.
   private static func drawProgress(
     _ frame: CGRect, stage: StudioGeneration.Stage, canRetry: Bool, context: CGContext
   ) {
@@ -230,6 +244,8 @@ struct StudioGenerationCard {
     }
   }
 
+  // Ставим значок и подпись действия в измеренную область. У повтора оставляем место слева для
+  // стрелки, чтобы она не перекрыла текст.
   static func drawControl(_ control: Control, context: CGContext) {
     if let icon = control.icon {
       let isRetry = control.action == .retry
@@ -253,7 +269,8 @@ struct StudioGenerationCard {
         UIImage(named: name)?.cgImage.map { (name, $0) }
       })
   }()
-  /// Используется при оформлении действий карточки без повторного чтения изображения из ресурсов.
+  // Берём готовый значок из памяти и подгоняем к нужной рамке. Поворот координат сохраняет
+  // направление при рисовании внутри строки.
   private static func drawIcon(_ name: String, in rect: CGRect, context: CGContext) {
     guard let icon = icons[name] else { return }
     context.saveGState()
@@ -262,12 +279,16 @@ struct StudioGenerationCard {
     context.draw(icon, in: CGRect(origin: .zero, size: rect.size))
     context.restoreGState()
   }
+  // Заполняем скруглённую рамку переданным цветом. Так фон ячейки и кнопки строятся одним
+  // способом.
   private static func fill(_ rect: CGRect, corner: CGFloat, color: UIColor, in context: CGContext) {
     context.setFillColor(color.cgColor)
     context.addPath(
       CGPath(roundedRect: rect, cornerWidth: corner, cornerHeight: corner, transform: nil))
     context.fillPath()
   }
+  // Подготавливаем строку со шрифтом и цветом для измерения и рисования на слое. Надпись можно
+  // центрировать по её фактической ширине.
   private static func line(
     _ value: String, size: CGFloat, color: UIColor, weight: UIFont.Weight = .regular
   ) -> CTLine {
@@ -278,7 +299,8 @@ struct StudioGenerationCard {
           .font: UIFont.systemFont(ofSize: size, weight: weight), .foregroundColor: color
         ]))
   }
-  /// Учитывает высоту букв над строкой и под ней, чтобы подпись выглядела выровненной.
+  // Выставляем исходную линию по высоте букв над ней и под ней. Подпись оказывается по центру и
+  // не переворачивается при переходе между координатами.
   private static func drawLine(_ line: CTLine, x: CGFloat, midY: CGFloat, context: CGContext) {
     var a: CGFloat = 0, d: CGFloat = 0
     _ = CTLineGetTypographicBounds(line, &a, &d, nil)
@@ -298,7 +320,8 @@ struct StudioGenerationCard {
   private var value: Int?
   private var bound = false
 
-  /// Настраивает цвета и размеры линий один раз, чтобы следующие обновления меняли только состояние.
+  // Один раз создаём дугу, фон и текстовые подписи индикатора. Дальше при каждом обновлении
+  // меняем значения и размеры уже созданных слоёв.
   override init() {
     super.init()
     zPosition = 2
@@ -321,9 +344,16 @@ struct StudioGenerationCard {
     deliveryLabel.isHidden = true
     deliveryLabel.string = "Загружаем фото"
   }
+  // Передаём системе копирование слоя индикатора для анимации. Видимая копия получает обычные
+  // свойства исходного слоя.
   override init(layer: Any) { super.init(layer: layer) }
+  // Этот индикатор получают из состояния генерации. Загрузка размеченного окна без такого
+  // состояния не используется.
   required init?(coder: NSCoder) { fatalError() }
 
+  // Привязываем индикатор к ячейке и плавно переводим дугу от показанной длины к новой. При
+  // отключённом движении сразу ставим цель. Пока готовое фото ещё читается, добавляем отдельную
+  // подпись загрузки.
   func bind(frame: CGRect, progress: Int?, scale: CGFloat, deliveringPhoto: Bool = false) {
     self.frame = frame
     backgroundColor =

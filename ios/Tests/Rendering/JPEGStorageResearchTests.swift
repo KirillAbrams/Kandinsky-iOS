@@ -1,3 +1,6 @@
+// Проверяем, как хранение уменьшенной фотографии влияет на цвет, прозрачность и время подготовки
+// при одинаковом исходном файле.
+
 import XCTest
 import UIKit
 import ImageIO
@@ -7,6 +10,8 @@ import Darwin
 @MainActor final class JPEGStorageResearchTests: XCTestCase {
   private struct Catalogue: Decodable { let files: [Record] }
   private struct Record: Decodable { let fileName: String, mime: String, blobId: String }
+  // Читаем уменьшенное изображение с ограничением размера. По признаку возвращаем готовую
+  // картинку напрямую либо перекладываем её пиксели в отдельную область памяти.
   private nonisolated static func prepare(_ url: URL, copy: Bool) throws -> CGImage {
     let source = try XCTUnwrap(
       CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary))
@@ -27,6 +32,8 @@ import Darwin
     c.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
     return try XCTUnwrap(c.makeImage())
   }
+  // Читаем суммарное время текущего потока с точностью до долей секунды. Так паузы между
+  // повторениями не занижают и не завышают затраты на подготовку.
   private nonisolated static func cpu() throws -> Double {
     var info = thread_basic_info_data_t(),
       count = mach_msg_type_number_t(
@@ -44,7 +51,8 @@ import Darwin
     return Double(info.user_time.seconds) + Double(info.system_time.seconds) + Double(
       info.user_time.microseconds + info.system_time.microseconds) / 1_000_000
   }
-  /// Возвращает байты всех пикселей, чтобы разные способы хранения можно было сравнить одинаково.
+  // Рисуем результат в общий цветовой формат и копируем байты. Это нужно, чтобы одинаково читать
+  // прозрачность обеих картинок.
   private func pixels(_ image: CGImage) throws -> [UInt8] {
     let c = try XCTUnwrap(
       CGContext(
@@ -57,6 +65,8 @@ import Darwin
         start: try XCTUnwrap(c.data).assumingMemoryBound(to: UInt8.self),
         count: image.width * image.height * 4))
   }
+  // На восьми исходных файлах сверяем размеры и содержимое. В обоих вариантах большая сторона
+  // остаётся в пределах 512 пикселей, а сравнение вылавливает изменение цветов.
   func testNativeImageStorageWithoutChangingThumbnailDecoder() async throws {
     let base = try XCTUnwrap(
       Bundle(for: RepositoryHarness.self).url(forResource: "fixtures", withExtension: nil)
@@ -92,6 +102,8 @@ import Darwin
     let batches: [[String: Double]] = try await withCheckedThrowingContinuation { reply in
       queue.async {
         do {
+          // Многократно готовим уменьшенные фото одним способом и возвращаем время и площадь.
+          // Если площади отличаются, результат замера нельзя сравнить.
           func batch(_ copy: Bool) throws -> [String: Double] {
             let cpuStart = try Self.cpu(), start = ProcessInfo.processInfo.systemUptime
             var work = 0

@@ -1,6 +1,11 @@
+// Проверяем, что история из ста тысяч строк читается страницами и ссылается на прежний набор фото
+// и видео без новых копий.
+
 import XCTest
 @testable import Kandinsky
 @MainActor final class HundredThousandStressTests: XCTestCase {
+  // Заполняем местную базу ста тысячами строк, читаем страницы по ключу и проверяем верхний
+  // предел окна. Число путей к вложениям и целостность базы должны сохраниться.
   func testNativeSQLiteKeysetAndBoundedWindowWithSameMediaPool() async throws {
     let h = try await RepositoryHarness.open()
     let corpus = try XCTUnwrap(

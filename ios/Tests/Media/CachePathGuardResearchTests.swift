@@ -1,10 +1,15 @@
+// Здесь сверяются быстрый и исходный способы находить файлы в каталоге приложения. Проверки
+// измеряют работу на обычных именах и следят, чтобы разбор ссылок сохранял границы каталога и
+// закрывал открытые файлы.
+
 import XCTest
 import Foundation
 import Darwin
 @testable import Kandinsky
 
 @MainActor final class CachePathGuardResearchTests: XCTestCase {
-  // Он не должен вычисляться через проверяемую новую реализацию.
+  // Проверяем относительное имя и приводим каталог и файл к настоящим путям. Эту отдельную
+  // способ используем как эталон результата для сравнения с рабочим поиском.
   private nonisolated static func reference(root: URL, relative: String) throws -> URL {
     let parts = relative.split(separator: "/", omittingEmptySubsequences: false)
     guard !relative.hasPrefix("/"), !parts.isEmpty, !parts.contains(""), !parts.contains(".."),
@@ -26,6 +31,8 @@ import Darwin
     guard file.path.hasPrefix(base.path + "/") else { throw MediaError.corrupt }
     return file
   }
+  // Создаём временную структуру с каталогами приложения и отдельным внешним каталогом. Изоляция
+  // нужна, чтобы измерения не затрагивали сохранённые файлы пользователя.
   private func root() throws -> URL {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(
       "Kandinsky-cache-path-" + UUID().uuidString)
@@ -35,7 +42,8 @@ import Darwin
     }
     return root
   }
-  /// Возвращает исходный файл без повторного кодирования для наполнения временных путей.
+  // Читаем подготовленное настоящее фото как байты без повторного сжатия. Один и тот же файл
+  // наполняет оба варианта путей.
   private func jpeg() throws -> Data {
     let base = try XCTUnwrap(
       Bundle(for: RepositoryHarness.self).url(forResource: "fixtures", withExtension: nil))
@@ -43,6 +51,8 @@ import Darwin
       contentsOf: base.appendingPathComponent(
         "real-media/backend-824d66cce0d64409ad4888a13792c7d4.jpg"))
   }
+  // Возвращаем сумму пользовательского и системного времени текущего потока. Так задержка очереди
+  // и нагрузка других потоков меньше влияют на сравнение.
   private nonisolated static func cpu() throws -> Double {
     var info = thread_basic_info_data_t(),
       count = mach_msg_type_number_t(
@@ -58,6 +68,9 @@ import Darwin
     return Double(info.user_time.seconds) + Double(info.system_time.seconds) + Double(
       info.user_time.microseconds + info.system_time.microseconds) / 1_000_000
   }
+  // Наполняем обычные каталоги и сверяем, что оба подхода возвращают одинаковые пути. Затем
+  // чередуем замеры. Быстрый путь должен заметно уменьшить затраты потока при том же объёме
+  // работы.
   func testCachePathsAvoidRepeatedGenericAncestryWalks() async throws {
     let root = try root()
     defer { try? FileManager.default.removeItem(at: root) }
@@ -78,7 +91,9 @@ import Darwin
     let batches: [[String: Double]] = try await withCheckedThrowingContinuation { reply in
       queue.async {
         do {
-          /// Считает длину результата, чтобы сравниваемые варианты выполняли одинаковую наблюдаемую работу.
+          // Повторяем обход одного набора путей выбранным способом и собираем число обработанных
+          // знаков вместе со временем. Объём нужен, чтобы сравнение не засчитало пропущенную
+          // работу как ускорение.
           func batch(_ candidate: Bool, loops: Int) throws -> [String: Double] {
             let begin = try Self.cpu()
             var characters = 0
@@ -110,6 +125,8 @@ import Darwin
         } catch { reply.resume(throwing: error) }
       }
     }
+    // Сортируем четыре замера и берём середину между двумя центральными. Случайный быстрый или
+    // медленный прогон не определяет весь результат.
     func median(_ values: [Double]) -> Double {
       let v = values.sorted()
       return (v[1] + v[2]) / 2
@@ -134,6 +151,9 @@ import Darwin
       b / a, 0.55,
       "A proven hot cache path must remove repeated ancestry traversal, not just rename it")
   }
+  // Сравниваем ответы для обычных, отсутствующих и меняющихся ссылок. После серии проверяем, что
+  // временные открытия закрылись. Отдельно оставляем один открытый каталог, чтобы убедиться, что
+  // счётчик замечает утечку.
   func testCanonicalPathsAndLiveAliasesMatchFrozenGuardWithoutDescriptorLeaks() throws {
     let root = try root(), fm = FileManager.default
     defer { try? fm.removeItem(at: root) }
@@ -142,6 +162,8 @@ import Darwin
     try jpeg().write(to: source)
     try fm.copyItem(at: source, to: root.appendingPathComponent("outside/source.jpg"))
     var checks = 0
+    // Вызываем оба способа для одинакового корня и имени. Сравниваем либо полученные адреса, либо
+    // причины отказа. Разные исходы означают изменение правил.
     func compare(_ suppliedRoot: URL, _ relative: String) {
       checks += 1
       let old = Result { try Self.reference(root: suppliedRoot, relative: relative) },
@@ -206,6 +228,8 @@ import Darwin
       for path in ordinary { compare(alias, path) }
     }
     let canonical = root.resolvingSymlinksInPath().standardizedFileURL.path
+    // Собираем открытые системные номера путей под временным корнем. Сортировка позволяет
+    // сравнить состояние до и после независимо от порядка обхода.
     func descriptors() -> [String] {
       var result: [String] = []
       for fd in 0..<1024 {

@@ -1,3 +1,7 @@
+// Замеры чтения маленьких кадров на реальных сохранённых изображениях. Проверяем размеры и
+// прозрачность, затем сравниваем время трёх способов подготовки, чтобы более быстрый путь не
+// менял ожидаемый рисунок.
+
 import XCTest
 import UIKit
 import ImageIO
@@ -13,6 +17,8 @@ import Darwin
   private struct Record: Decodable {
     let assetId: String, blobId: String, tinySHA256: String, tinyPreview: String
   }
+  // Проверяем небольшой размер источника и используем прямое чтение либо создание миниатюры. Оба
+  // способа получают те же байты для честного сравнения.
   private nonisolated static func decode(_ data: Data, direct: Bool) throws -> CGImage {
     let source = try XCTUnwrap(
       CGImageSourceCreateWithData(
@@ -37,7 +43,8 @@ import Darwin
           kCGImageSourceThumbnailMaxPixelSize: 64, kCGImageSourceShouldCacheImmediately: true
         ] as CFDictionary))
   }
-  /// Возвращает готовый рисунок, чтобы работа не переносилась на последующий показ.
+  // Читаем размеры и сразу выводим кадр в заранее заданный формат изображения. Так можно оценить
+  // подготовку к показу целиком, включая работу с цветом.
   private nonisolated static func rasterDecode(_ data: Data) throws -> CGImage {
     let source = try XCTUnwrap(
       CGImageSourceCreateWithData(
@@ -58,6 +65,8 @@ import Darwin
     context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
     return try XCTUnwrap(context.makeImage())
   }
+  // Измеряем процессорное время рабочего потока вместе с его системными вызовами. Ожидание
+  // запуска в очереди в этот показатель не входит.
   private nonisolated static func cpu() throws -> Double {
     var info = thread_basic_info_data_t(),
       count = mach_msg_type_number_t(
@@ -73,6 +82,8 @@ import Darwin
     return Double(info.user_time.seconds) + Double(info.system_time.seconds) + Double(
       info.user_time.microseconds + info.system_time.microseconds) / 1_000_000
   }
+  // Рисуем изображение в одном цветовом пространстве и копируем четыре канала каждой точки.
+  // Сравнение исходных файлов не показало бы, что видит пользователь.
   private nonisolated static func pixels(_ image: CGImage) throws -> [UInt8] {
     let context = try XCTUnwrap(
       CGContext(
@@ -85,12 +96,18 @@ import Darwin
         start: try XCTUnwrap(context.data).assumingMemoryBound(to: UInt8.self),
         count: image.width * image.height * 4))
   }
+  // Сравниваем чтение настоящих небольших кадров напрямую со штатной миниатюрой. Размеры и
+  // прозрачность должны сохраниться.
   func testAlreadySmallRealServerJPEGsAgainstDirectImageDecode() async throws {
     try await compare(raster: false)
   }
+  // Проверяем вариант, где фоновый работник готовит кадр к показу за один проход. Для него
+  // используем тот же набор файлов и способ сравнения.
   func testAlreadySmallRealServerJPEGsAgainstWorkerRasterDecode() async throws {
     try await compare(raster: true)
   }
+  // Проверяем контрольные суммы одиннадцати входов, затем сравниваем размеры и цветовые каналы.
+  // По очереди замеряем способы чтения и отдельно убеждаемся, что прозрачность не изменилась.
   private func compare(raster: Bool) async throws {
     let base = try XCTUnwrap(
       Bundle(for: RepositoryHarness.self).url(forResource: "fixtures", withExtension: nil)
@@ -130,6 +147,9 @@ import Darwin
     let batches: [[String: Double]] = try await withCheckedThrowingContinuation { reply in
       queue.async {
         do {
+          // Читаем выбранным способом и сразу рисуем результат, чтобы не пропустить ленивую
+          // обработку. Возвращаем затраты потока, время ожидания и одинаковый объём точек для
+          // обеих серий.
           func batch(_ direct: Bool, loops: Int) throws -> [String: Double] {
             let sink = try XCTUnwrap(
               CGContext(

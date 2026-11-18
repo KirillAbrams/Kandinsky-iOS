@@ -1,3 +1,7 @@
+// Выбираем, сколько текста и медиа подготовить вокруг видимой части ленты на айфоне. Заранее
+// смотрим дальше в сторону быстрого движения, но ограничиваем объём, чтобы не держать лишние
+// файлы и строки.
+
 import Foundation
 
 struct ScrollPreparationWindow {
@@ -5,6 +9,9 @@ struct ScrollPreparationWindow {
   private(set) var mediaBefore = 500.0, mediaAfter = 320.0
   private var offset: Double?, timestamp: Double?
 
+  // Берём скорость и направление из двух измерений. Игнорируем почти одновременные вызовы, после
+  // паузы возвращаем короткий запас, а при движении расширяем его вперёд. Для медиа предел
+  // меньше, чтобы подготовка не заняла весь чат.
   mutating func observe(offset next: Double, at now: Double, viewport: Double) {
     guard next.isFinite, now.isFinite, viewport.isFinite, viewport > 0 else { return }
     let mediaCeiling = min(4096, viewport * 3)
@@ -49,10 +56,14 @@ struct ScrollPreparationWindow {
     }
   }
 
+  // Сдвигаем исходную точку измерения после пересчёта геометрии. Без этого изменение отступа
+  // выглядело бы как ещё одно движение пальца.
   mutating func rebase(by delta: Double) {
     guard delta.isFinite else { return }
     if let offset { self.offset = offset + delta }
   }
+  // Возвращаем начальный запас и очищаем показания времени и позиции. Следующий чат начинает
+  // оценку по своему первому движению.
   mutating func reset() {
     before = 500
     after = 500

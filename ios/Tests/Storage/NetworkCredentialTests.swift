@@ -1,8 +1,13 @@
+// Проверяет хранение ключей входа, восстановление выбранного чата и удаление данных одного
+// владельца. Для местных проверок используются отдельные папки и имена хранилища ключей.
+
 import Security
 import XCTest
 @testable import Kandinsky
 
 final class NetworkCredentialTests: XCTestCase {
+  // Сохраняет ключ и выбранный чат, выполняет выход и затем записывает новый ключ. Выход убирает
+  // данные входа, а выбранное место можно вернуть после повторного входа.
   func testLogoutKeepsTheOwnersSelectedChatWithoutKeepingCredentials() throws {
     let user = Int64.random(in: 1_000_000...Int64.max)
     let service = "kandinsky.qa.navigation." + UUID().uuidString
@@ -26,6 +31,8 @@ final class NetworkCredentialTests: XCTestCase {
     XCTAssertEqual(NetworkCredentials.selectedChat(for: user), 3151)
   }
 
+  // Убирает профиль по номеру после окончания входа. Проверяет, что ключи исчезли и при этом
+  // выбранный чат владельца сохранился.
   func testExpiredSessionKeepsTheOwnersSelectedChatWithoutKeepingCredentials() throws {
     let user = Int64.random(in: 1_000_000...Int64.max)
     let service = "kandinsky.qa.expired." + UUID().uuidString
@@ -43,6 +50,8 @@ final class NetworkCredentialTests: XCTestCase {
     XCTAssertEqual(NetworkCredentials.selectedChat(for: user), 3151)
   }
 
+  // Запоминает разные чаты у двух владельцев и завершает удаление одного. Проверяет, что
+  // выбранный чат и ключ удалённого исчезли, а выбор второго остался.
   func testPermanentErasureClearsOnlyTheDeletedOwnersSelection() throws {
     let user = Int64.random(in: 1_000_000...(Int64.max - 1))
     let other = user + 1
@@ -67,7 +76,8 @@ final class NetworkCredentialTests: XCTestCase {
     XCTAssertEqual(NetworkCredentials.selectedChat(for: other), 4000)
   }
 
-  /// Некорректный ключ доступа не должен заменять последний действительный профиль.
+  // Сохраняет несколько профилей, включая старый без имени для входа, и превышает предел списка.
+  // Неверный ключ не должен занять место последнего действительного профиля.
   func testRememberedAccountsRemainBoundedAndPreserveLegacyProfile() throws {
     let service = "kandinsky.qa.credentials." + UUID().uuidString
     let store = NetworkCredentialStore(service: service)
@@ -97,6 +107,9 @@ final class NetworkCredentialTests: XCTestCase {
         NetworkProfile(userId: 1234, deviceId: "bad", name: "Bad", token: "bad", expiresAtMs: 1)))
     XCTAssertEqual(try store.load()?.userId, 1010)
   }
+  // Сверяет отметку резервного копирования, уборку старых временных файлов и свойства ключей в
+  // системном хранилище. Так можно обнаружить утечку ключей в копию или удаление файла активной
+  // подготовки.
   func testAccountFilesAreExcludedFromBackupAndCredentialsStayOnThisDevice() throws {
     let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: base) }
@@ -134,6 +147,8 @@ final class NetworkCredentialTests: XCTestCase {
     XCTAssertTrue(try store.profiles().isEmpty)
   }
 
+  // По явному разрешению обращается к защищённому адресу без ключа и ждёт отказ сервера. Ответ
+  // подтверждает установку защищённого соединения и требование входа на этом маршруте.
   func testReleaseClientReachesProtectedRouteOverTLS() async throws {
     try XCTSkipUnless(ProcessInfo.processInfo.environment["KANDINSKY_VERIFY_LIVE_TLS"] == "1")
     let api = NetworkAPI(profile: nil)
@@ -146,6 +161,8 @@ final class NetworkCredentialTests: XCTestCase {
     }
   }
 
+  // Читает сохранённый профиль прежнего вида без имени для входа. Старый аккаунт остаётся
+  // читаемым, а новое поле остаётся пустым.
   func testOldSessionJSONWithoutUsernameRemainsReadable() throws {
     let data = Data(
       """
@@ -162,6 +179,8 @@ final class NetworkCredentialTests: XCTestCase {
     XCTAssertEqual(profile.userId, 1)
     XCTAssertNil(profile.username)
   }
+  // Создаёт соседние папки и прерывает очистку искусственной ошибкой, затем повторяет её.
+  // Проверяет исчезновение только выбранной папки и сохранение профиля второго аккаунта.
   func testErasureResumesFromDiskAndPreservesTheOtherAccount() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
@@ -190,6 +209,8 @@ final class NetworkCredentialTests: XCTestCase {
     try LocalAccountErasure.finish(root: root, forget: credentials.forget)
   }
 
+  // Убирает записи только по отдельному имени временного хранилища. Проверка признаёт отсутствие
+  // записей нормальным, чтобы уборку можно было провести повторно.
   private func clearTestCredentials(service: String) {
     let query: [String: Any] = [
       kSecClass as String: kSecClassGenericPassword,

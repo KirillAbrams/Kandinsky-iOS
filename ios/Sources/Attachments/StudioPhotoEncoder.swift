@@ -1,8 +1,13 @@
+// Записывает подготовленное изображение в файл снимка для студии. Управляет незавершённой копией
+// при отмене и сбое записи.
+
 import UIKit
 import ImageIO
 import UniformTypeIdentifiers
 
 struct StudioPhotoEncoder {
+  // Проверяет путь и отмену, задаёт правильную ориентацию и качество снимка, затем завершает
+  // файл. Если любое условие сорвалось, частичный файл убирается.
   func jpeg(_ image: CGImage, to url: URL, cancel: () -> Bool = { false }) throws {
     guard url.isFileURL, !cancel() else { throw MediaError.cancelled }
     var completed = false
