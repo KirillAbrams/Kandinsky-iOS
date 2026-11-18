@@ -342,10 +342,11 @@ import UIKit
     onReady?()
   }
   private var hasUsablePhoto: Bool { appearance?.kind == .photo && hasSharpFrame }
+  // Центр фото в ленте открывает просмотр даже во время загрузки.
   private var hasTransferControl: Bool {
-    loading && !hasUsablePhoto && appearance?.studioPhotoDelivery != true
-      && (progress > 0
-        || (appearance?.showLoadingControl != false && (appearance?.kind == nil || transferStarted)))
+    loading && appearance?.showLoadingControl == true && !hasUsablePhoto
+      && appearance?.studioPhotoDelivery != true
+      && (progress > 0 || appearance?.kind == nil || transferStarted)
   }
   var loadAction: (CGRect, String)? {
     guard showsControls, !hasUsablePhoto, failed || hasTransferControl else { return nil }

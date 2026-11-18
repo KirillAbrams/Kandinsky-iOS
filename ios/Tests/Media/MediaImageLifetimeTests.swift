@@ -109,6 +109,49 @@ import UIKit
     try await h.close()
   }
 
+  func testInlinePhotoTapDoesNotCancelDownloadAfterProgress() async throws {
+    let harness = try await RepositoryHarness.open()
+    let media = MediaStore(store: harness.store)
+    let slot = MediaImageSlot(store: media)
+    let source = try XCTUnwrap(
+      Bundle(for: RepositoryHarness.self).url(forResource: "fixtures", withExtension: nil)
+    ).appendingPathComponent("media/photo-000.jpg")
+    let photo = Attachment(
+      id: "inline-photo", relativePath: "remote/not-cached.jpg", mime: "image/jpeg",
+      byteSize: 128, rawWidth: 96, rawHeight: 96, orientation: 1, durationMs: nil,
+      thumbnailKey: "inline-photo")
+    let frame = CGRect(x: 0, y: 0, width: 150, height: 150)
+    let release = DispatchSemaphore(value: 0)
+    defer { release.signal(); slot.close(); media.close() }
+    media.remoteFile = { _, _, token in
+      token.reportProgress(0.4)
+      guard release.wait(timeout: .now() + 7) == .success, !token.isCancelled else {
+        throw MediaError.cancelled
+      }
+      return (source, "image/jpeg")
+    }
+    slot.bind(photo, frame: frame, kind: .photo)
+    for _ in 0..<120 where slot.loadAction == nil {
+      try await Task.sleep(nanoseconds: 20_000_000)
+    }
+    XCTAssertEqual(slot.loadAction?.1, "Отменить загрузку", "The fixture must report real progress")
+
+    slot.bind(photo, frame: frame, kind: .photo, showLoadingControl: false)
+    XCTAssertNil(slot.loadAction, "A photo in chat must not show a cancel button")
+    XCTAssertFalse(
+      slot.performLoadAction(at: CGPoint(x: 75, y: 75)),
+      "Tapping the photo must not cancel its download")
+    XCTAssertTrue(slot.loading)
+    release.signal()
+    for _ in 0..<120 where !slot.hasSharpFrame {
+      try await Task.sleep(nanoseconds: 20_000_000)
+    }
+    XCTAssertTrue(slot.hasSharpFrame, "The same download must produce a sharp photo")
+    slot.close()
+    media.close()
+    try await harness.close()
+  }
+
   // Готовим пять разных рисунков и проверяем цвет каждой ячейки. При сдвиге остаётся прежняя
   // запись текста. После ухода альбом освобождает все кадры и их память.
   func testAlbumPaintsEveryNativeImageAndRetiresAllLeasesOutsideViewport() async throws {
