@@ -44,6 +44,8 @@
 	</array>
 	<key>NSCameraUsageDescription</key>
 	<string>Снять фото и добавить его к запросу.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Сохранить выбранный результат в галерею.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Выбрать фото или видео для запроса.</string>
 </dict>
