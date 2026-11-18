@@ -6,17 +6,21 @@
 
 ## Как открыть
 
-Открой [проект приложения](ios/Kandinsky.xcodeproj) в **Xcode**
+На Маке установи **Xcode** и запусти один симулятор айфона. Из корня скачанного проекта выполни одну команду. Она соберёт приложение, установит его и откроет на симуляторе.
 
-Выбери схему **Kandinsky** и симулятор
+```sh
+xcodebuild -project ios/Kandinsky.xcodeproj -scheme Kandinsky -configuration Release -destination 'generic/platform=iOS Simulator' -derivedDataPath DerivedData CODE_SIGNING_ALLOWED=NO build && \
+  xcrun simctl install "${KANDINSKY_SIMULATOR:-booted}" DerivedData/Build/Products/Release-iphonesimulator/Kandinsky.app && \
+  xcrun simctl launch "${KANDINSKY_SIMULATOR:-booted}" dev.kirill.kandinsky.native
+```
 
-Для установки на айфон выбери свой телефон и команду подписи
+При нескольких запущенных симуляторах укажи нужный через **KANDINSKY_SIMULATOR**. Идентификатор можно посмотреть в списке **xcrun simctl list devices booted**.
 
-Приложение поддерживает систему версии 16 и новее
+Для установки на айфон открой [проект приложения](ios/Kandinsky.xcodeproj) в Xcode, выбери схему **Kandinsky**, свой телефон и команду подписи. Приложение поддерживает систему версии 16 и новее.
 
-Адрес своего сервера можно передать через **KANDINSKY_BRIDGE_ORIGIN**
+По умолчанию приложение подключается к рабочему серверу в Алматы. Для регистрации понадобится почта, на которую придёт код. После входа можно открыть «Плотную медиаленту» и «Длинную историю». Для своих генераций создай новый чат.
 
-Для подключения нужен защищённый адрес службы связи с действующим сертификатом
+Адрес своего сервера можно передать через **KANDINSKY_BRIDGE_ORIGIN** при сборке. Нужен защищённый адрес с действующим сертификатом.
 
 ## Карта проекта
 
