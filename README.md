@@ -9,7 +9,7 @@
 На Маке установи **Xcode** и запусти один симулятор айфона. Из корня скачанного проекта выполни одну команду. Она соберёт приложение, установит его и откроет на симуляторе.
 
 ```sh
-xcodebuild -project ios/Kandinsky.xcodeproj -scheme Kandinsky -configuration Release -destination 'generic/platform=iOS Simulator' -derivedDataPath DerivedData CODE_SIGNING_ALLOWED=NO build && \
+xcodebuild -project ios/Kandinsky.xcodeproj -scheme Kandinsky -configuration Release -destination 'generic/platform=iOS Simulator' -derivedDataPath DerivedData build && \
   xcrun simctl install "${KANDINSKY_SIMULATOR:-booted}" DerivedData/Build/Products/Release-iphonesimulator/Kandinsky.app && \
   xcrun simctl launch "${KANDINSKY_SIMULATOR:-booted}" dev.kirill.kandinsky.native
 ```
