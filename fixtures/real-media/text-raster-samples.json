@@ -1,0 +1,43 @@
+{
+  "chatId": 1352,
+  "datasetId": "kandinsky-real-story-v1",
+  "publicationSHA256": "f678bd2de49f801b4da6d97a48304ea1290f4a4874f142903ccfc7ae3ac40c58",
+  "note": "Exact fictional conversation text already published in real server history; sampled by immutable local messageID. Photos/media are not generated.",
+  "rows": [
+    {
+      "messageId": 10041,
+      "sortKey": 10000,
+      "savedAtMs": 1793812495000,
+      "text": "Давайте иногда повторять. Не только когда все устали.",
+      "direction": "incoming"
+    },
+    {
+      "messageId": 10042,
+      "sortKey": 9873,
+      "savedAtMs": 1793542696740,
+      "text": "Я бы уточнил только «In the picture I can see a bird in the water». Остальное понятно.",
+      "direction": "incoming"
+    },
+    {
+      "messageId": 10045,
+      "sortKey": 9876,
+      "savedAtMs": 1793542815740,
+      "text": "Можно взять такую формулировку:\nIn this picture we can see blueberries. Background of the image is blurred, it is green in color and stems are visible.\n\nФото: Jimmy_Joe · CC BY 2.0\nhttps://www.flickr.com/photos/joc67/185854834/\nhttps://creativecommons.org/licenses/by/2.0/\nОбработка: размер, ориентация, JPEG и превью.",
+      "direction": "incoming"
+    },
+    {
+      "messageId": 10048,
+      "sortKey": 9879,
+      "savedAtMs": 1793553016000,
+      "text": "После сегодняшнего обсуждения я отдельно записала про хранение.\n\nЯ записала, к чему сегодня пришли, чтобы завтра не начинать заново.\nНе пытаемся сделать один кадр ответом на все вопросы. Сначала смотрим на серию целиком, потом на отдельные детали. Если вариант не работает рядом с остальными, это ещё не значит, что сама фотография плохая. Возможно, ей просто нужна другая компания.\n\nДля следующей встречи оставим одну понятную задачу: убрать материалы на хранение.",
+      "direction": "incoming"
+    },
+    {
+      "messageId": 10063,
+      "sortKey": 9894,
+      "savedAtMs": 1793628438680,
+      "text": "Вот как описали этот кадр:\nThis image is taken indoors. In the middle of the image a man is standing and he is holding two objects in his hands. In the background there is a wooden wall. There are many bottles and glasses on the shelf. There is a device on the shelf. At the bottom of the image there is a table with a bottle, a few glasses of drinks, a board with a text on it, cash, balloons and many objects on it. On the left side of the image a person is holding a glass of drink in the hand. On the right side of the image there is a person.\n\nФото: Missy Ward · CC BY 2.0\nhttps://www.flickr.com/photos/missyward/4540876458\nhttps://creativecommons.org/licenses/by/2.0/\nОбработка: размер, ориентация, JPEG и превью.\nГолос: Jordi Pont-Tuset et al. (ECCV2020), human annotator 75 · CC BY 4.0\nhttps://google.github.io/localized-narratives/\nhttps://creativecommons.org/licenses/by/4.0/\nЗапись перекодирована в AAC.",
+      "direction": "incoming"
+    }
+  ]
+}

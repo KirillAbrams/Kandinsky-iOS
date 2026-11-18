@@ -1,0 +1,232 @@
+import Foundation
+import CoreGraphics
+final class ImageByteBudget: @unchecked Sendable {
+  private let lock = NSLock()
+  private var used = 0, peak = 0, maximum = 48 * 1024 * 1024
+  var limit: Int {
+    get {
+      lock.lock()
+      defer { lock.unlock() }
+      return maximum
+    }
+    set {
+      lock.lock()
+      maximum = max(0, newValue)
+      lock.unlock()
+    }
+  }
+  var bytes: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return used
+  }
+  var peakBytes: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return peak
+  }
+  func canFit(_ value: Int) -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return value > 0 && used <= maximum - value
+  }
+  func reserve(_ value: Int) -> ImageByteCharge? {
+    lock.lock()
+    guard value > 0, used <= maximum - value else {
+      lock.unlock()
+      return nil
+    }
+    used += value
+    peak = max(peak, used)
+    lock.unlock()
+    return ImageByteCharge(budget: self, bytes: value)
+  }
+  fileprivate func release(_ value: Int) {
+    lock.lock()
+    used = max(0, used - value)
+    lock.unlock()
+  }
+}
+final class ImageByteCharge: @unchecked Sendable {
+  private let lock = NSLock()
+  private let budget: ImageByteBudget
+  private var amount: Int
+  init(budget: ImageByteBudget, bytes: Int) {
+    self.budget = budget
+    amount = bytes
+  }
+  func shrink(to actual: Int) throws {
+    lock.lock()
+    guard actual >= 0, actual <= amount else {
+      lock.unlock()
+      throw MediaError.unavailable
+    }
+    let difference = amount - actual
+    amount = actual
+    lock.unlock()
+    budget.release(difference)
+  }
+  /// Сначала обнуляет собственную сумму, чтобы повторный вызов не освободил её второй раз.
+  func close() {
+    lock.lock()
+    let value = amount
+    amount = 0
+    lock.unlock()
+    budget.release(value)
+  }
+  deinit { close() }
+}
+final class ImagePixels: @unchecked Sendable {
+  private let lock = NSLock()
+  private var value: CGImage?
+  private var references = 1, ownerClosed = false
+  let byteSize: Int
+  private let charge: ImageByteCharge
+  let isTinyPreview: Bool
+  init(image: CGImage, charge: ImageByteCharge, isTinyPreview: Bool = false) {
+    self.isTinyPreview = isTinyPreview
+    value = image
+    byteSize = image.bytesPerRow * image.height
+    self.charge = charge
+  }
+  func frame() -> PreparedImage? {
+    lock.lock()
+    guard value != nil, references > 0 else {
+      lock.unlock()
+      return nil
+    }
+    references += 1
+    lock.unlock()
+    return PreparedImage(pixels: self)
+  }
+  var image: CGImage? {
+    lock.lock()
+    defer { lock.unlock() }
+    return value
+  }
+  var hasOnlyCacheOwner: Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return references == 1 && !ownerClosed
+  }
+  func closeOwner() {
+    lock.lock()
+    guard !ownerClosed else {
+      lock.unlock()
+      return
+    }
+    ownerClosed = true
+    releaseLocked()
+  }
+  fileprivate func release() {
+    lock.lock()
+    releaseLocked()
+  }
+  private func releaseLocked() {
+    references -= 1
+    let free = references == 0
+    if free { value = nil }
+    lock.unlock()
+    if free { charge.close() }
+  }
+}
+final class PreparedImage: MediaSurfacePayload, @unchecked Sendable {
+  private let lock = NSLock()
+  private var pixels: ImagePixels?
+  private var closes = 0
+  var closeCount: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return closes
+  }
+  let orientation = 1
+  var isTinyPreview: Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return pixels?.isTinyPreview == true
+  }
+  fileprivate init(pixels: ImagePixels) { self.pixels = pixels }
+  var image: CGImage? {
+    lock.lock()
+    defer { lock.unlock() }
+    return pixels?.image
+  }
+  /// Позволяет передать готовый кадр другому экрану без повторного декодирования.
+  func retained() -> PreparedImage? {
+    lock.lock()
+    defer { lock.unlock() }
+    return pixels?.frame()
+  }
+  func close() {
+    lock.lock()
+    guard let p = pixels else {
+      lock.unlock()
+      return
+    }
+    pixels = nil
+    closes += 1
+    lock.unlock()
+    p.release()
+  }
+  deinit { close() }
+}
+@MainActor final class ThumbnailCache {
+  private var values: [String: ImagePixels] = [:], order: [String] = []
+  private let budget: ImageByteBudget, entryLimit: Int, navigationBytes: Int
+  init(budget: ImageByteBudget, entryLimit: Int = 16, navigationBytes: Int = 8 * 1024 * 1024) {
+    self.budget = budget
+    self.entryLimit = entryLimit
+    self.navigationBytes = navigationBytes
+  }
+  func frame(_ key: String) -> PreparedImage? {
+    guard let value = values[key] else { return nil }
+    order.removeAll { $0 == key }
+    order.append(key)
+    return value.frame()
+  }
+  func makeRoom(_ amount: Int) -> Bool {
+    while !budget.canFit(amount),
+      let index = order.firstIndex(where: { values[$0]?.hasOnlyCacheOwner == true })
+    {
+      let key = order.remove(at: index)
+      values.removeValue(forKey: key)?.closeOwner()
+    }
+    return budget.canFit(amount)
+  }
+  /// Старые кадры вытесняются при достижении предела памяти или числа записей.
+  func insert(_ value: ImagePixels, key: String, maximumBytes: Int = .max) {
+    if let old = values.removeValue(forKey: key) {
+      old.closeOwner()
+      order.removeAll { $0 == key }
+    }
+    values[key] = value
+    order.append(key)
+    var bytes = values.values.reduce(0) { $0 + $1.byteSize }
+    while values.count > entryLimit || bytes > max(0, maximumBytes) {
+      guard let oldest = order.first else { break }
+      bytes -= values[oldest]?.byteSize ?? 0
+      evictFirst()
+    }
+  }
+  private func evictFirst() {
+    guard !order.isEmpty else { return }
+    let key = order.removeFirst()
+    values.removeValue(forKey: key)?.closeOwner()
+  }
+  func retainNavigationImages() {
+    for key in order.filter({ $0.contains("@original:") }) {
+      values.removeValue(forKey: key)?.closeOwner()
+      order.removeAll { $0 == key }
+    }
+    var bytes = values.values.reduce(0) { $0 + $1.byteSize }
+    while bytes > navigationBytes, let key = order.first {
+      bytes -= values[key]?.byteSize ?? 0
+      evictFirst()
+    }
+  }
+  func clear() {
+    for value in values.values { value.closeOwner() }
+    values.removeAll()
+    order.removeAll()
+  }
+}

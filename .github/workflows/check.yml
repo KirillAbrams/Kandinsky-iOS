@@ -1,0 +1,21 @@
+name: Проверки айфона
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  ios:
+    runs-on: macos-26-intel
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          xcodebuild -project ios/Kandinsky.xcodeproj -scheme Kandinsky \
+            -configuration Release -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/Kandinsky.xcarchive" \
+            CODE_SIGNING_ALLOWED=NO EXCLUDED_SOURCE_FILE_NAMES=fixtures archive
+          bundle="$RUNNER_TEMP/Kandinsky.xcarchive/Products/Applications/Kandinsky.app"
+          plutil -lint "$bundle/PrivacyInfo.xcprivacy"
+          test ! -e "$bundle/fixtures"

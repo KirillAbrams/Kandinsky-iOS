@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "files": [
+    {
+      "id": "gif-waterfall-0",
+      "fileName": "gif-waterfall-0.gif",
+      "relativePath": "catalogue/gif-waterfall-0.gif",
+      "mime": "image/gif",
+      "sha256": "be5ef71edf955f2b5eff67697bc1283268268847d09705d34d713b5fcb9e33bd",
+      "byteSize": 177377,
+      "width": 192,
+      "height": 192,
+      "durationMs": 1500,
+      "frameCount": 9,
+      "title": "Водопад",
+      "category": "Природа",
+      "license": "CC0",
+      "source": "https://commons.wikimedia.org/wiki/File:Watagataki_Falls_(Video).webm"
+    },
+    {
+      "id": "gif-waterfall-1",
+      "fileName": "gif-waterfall-1.gif",
+      "relativePath": "catalogue/gif-waterfall-1.gif",
+      "mime": "image/gif",
+      "sha256": "b84fee7d9ed4944c69ee514ed5b0fe1e762f181ac8a3fdd165691db5ca43b645",
+      "byteSize": 201142,
+      "width": 192,
+      "height": 192,
+      "durationMs": 1500,
+      "frameCount": 9,
+      "title": "Вода и скалы",
+      "category": "Природа",
+      "license": "CC0",
+      "source": "https://commons.wikimedia.org/wiki/File:Watagataki_Falls_(Video).webm"
+    },
+    {
+      "id": "gif-waterfall-2",
+      "fileName": "gif-waterfall-2.gif",
+      "relativePath": "catalogue/gif-waterfall-2.gif",
+      "mime": "image/gif",
+      "sha256": "be6d1163f5c3650133f7ec1c69756830c8dee6461d2a682da60906665f880181",
+      "byteSize": 192101,
+      "width": 192,
+      "height": 192,
+      "durationMs": 1500,
+      "frameCount": 9,
+      "title": "Горный поток",
+      "category": "Природа",
+      "license": "CC0",
+      "source": "https://commons.wikimedia.org/wiki/File:Watagataki_Falls_(Video).webm"
+    }
+  ]
+}
