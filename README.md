@@ -98,5 +98,3 @@
 
 - [Сервер Кандинского](https://github.com/KirillAbrams/Kandinsky-Backend)
 - [Приложение для Андроида](https://github.com/KirillAbrams/Kandinsky-Android)
-
-Общий снимок исходников проекта [057b0f7](https://github.com/KirillAbrams/Kandinsky/commit/057b0f78beed79a138f764d084b9ce29b8699ccd)
