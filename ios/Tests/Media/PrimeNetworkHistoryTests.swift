@@ -48,4 +48,52 @@ import XCTest
     XCTAssertEqual(stored, sequences.count)
     try await harness.close()
   }
+
+  func testScrollingNearTheStartLoadsAnEarlierPageOnlyOnce() async throws {
+    guard NetworkProfile.origin.host == "127.0.0.1" else {
+      throw XCTSkip("Нужен отдельный местный сервер с исходной медиалентой")
+    }
+    let profile = try StudioTestServer.profile()
+    let api = NetworkAPI(profile: profile)
+    let (chat, latest) = try await StudioTestServer.recentMedia(api)
+    let bootstrap = try await api.json("/v1/bootstrap")
+    let harness = try await RepositoryHarness.open()
+    let sync = NetworkSync(profile: profile, store: harness.store, local: harness.repo, api: api)
+    defer { sync.close() }
+    try await harness.store.perform { [cache = sync.cache] db in
+      try NetworkSchema.install(db)
+      _ = try cache.bootstrap(db, data: bootstrap)
+      _ = try cache.history(db, chat: chat, data: latest)
+    }
+    let initial = try await harness.repo.index(chatID: chat)
+    XCTAssertEqual(initial.count, 128)
+    let top = try XCTUnwrap(initial.first)
+    let online = expectation(description: "Сервер подтвердил открытие соединения")
+    sync.onStatus = { if $0 == "В сети" { online.fulfill() } }
+    sync.foreground(true)
+    await fulfillment(of: [online], timeout: 8)
+    sync.onStatus = nil
+
+    let earlier = expectation(description: "Предыдущая страница записана до обновления экрана")
+    earlier.assertForOverFulfill = true
+    let initialIDs = Set(initial.map(\.messageID))
+    sync.onDeltas = { changes in
+      let additions = changes.filter { $0.chat.id == chat }.flatMap(\.updated)
+      if additions.contains(where: { !initialIDs.contains($0.id) }) { earlier.fulfill() }
+    }
+    sync.viewport(chat: chat, anchor: ReadingAnchor())
+    let anchor = ReadingAnchor(messageID: top.messageID, followsBottom: false)
+    sync.viewport(chat: chat, anchor: anchor)
+    sync.viewport(chat: chat, anchor: anchor)
+    await fulfillment(of: [earlier], timeout: 8)
+
+    let loaded = try await harness.repo.index(chatID: chat)
+    XCTAssertEqual(loaded.count, 256)
+    XCTAssertEqual(Set(loaded.map(\.messageID)).count, 256)
+    XCTAssertEqual(Array(loaded.suffix(128).map(\.messageID)), initial.map(\.messageID))
+    XCTAssertTrue(loaded.prefix(128).allSatisfy { $0.order < top.order })
+    XCTAssertTrue(sync.history.loadingHistory.isEmpty)
+    sync.close()
+    try await harness.close()
+  }
 }

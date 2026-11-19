@@ -237,9 +237,12 @@ import Foundation
     published: (() -> Void)? = nil, render: @escaping (Int, Int) -> CGImage?
   ) {
     guard !closed, self.generation == generation, captures[key] == nil, captures.count < 2,
-      let sourceCharge = budget.reserve(sourceBytes),
-      let (w, h, charge) = reserveFrame(width: width, height: height)
+      let sourceCharge = budget.reserve(sourceBytes)
     else { return }
+    // Кадр остаётся в памяти, даже если места на новую копию пока нет.
+    let previous = frame(key)
+    defer { previous?.close() }
+    guard let (w, h, charge) = reserveFrame(width: width, height: height) else { return }
     let capture = CoverCapture(sourceCharge: sourceCharge, frameCharge: charge, render: render)
     let epoch = disk?.epoch()
     let token = captureQueue.submit(work: { () -> ImagePixels? in

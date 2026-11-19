@@ -26,32 +26,37 @@ private final class NetworkRedirectPolicy: NSObject, URLSessionTaskDelegate {
     completionHandler: @escaping (URLRequest?) -> Void
   ) { completionHandler(nil) }
 }
-private final class MediaDownloadProgress: NSObject, URLSessionDownloadDelegate {
+private final class MediaDownloadProgress: NSObject, URLSessionTaskDelegate {
   private let progress: @Sendable (Double) -> Void
-  private var last = Date.distantPast
-  // Сохраняет действие, которое покажет ход скачивания. Оно получает долю выполненной передачи в
-  // ходе чтения.
+  private let gate = NSRecursiveLock()
+  private var observation: NSKeyValueObservation?
+  private var lastUpdate: TimeInterval = -.infinity
+  private var lastValue = 0.0
+  private var stopped = false
+
   init(progress: @escaping @Sendable (Double) -> Void) { self.progress = progress }
-  // Принимает обязательное для загрузчика событие временного файла. Проверка и перемещение
-  // выполняются в ожидающем скачивании, поэтому здесь файл не открывается и не сохраняется
-  // повторно.
-  func urlSession(
-    _ session: URLSession, downloadTask: URLSessionDownloadTask,
-    didFinishDownloadingTo location: URL
-  ) {}
-  // Делит принятые байты на ожидаемые и ограничивает частоту обновления, сохраняя последний
-  // сигнал. Это уменьшает число обновлений экрана при скачивании.
-  func urlSession(
-    _ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64,
-    totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64
-  ) {
-    guard totalBytesExpectedToWrite > 0 else { return }
-    let now = Date()
-    guard now.timeIntervalSince(last) >= 0.08 || totalBytesWritten == totalBytesExpectedToWrite
-    else { return }
-    last = now
-    progress(Double(totalBytesWritten) / Double(totalBytesExpectedToWrite))
+
+  // Подписываемся до начала передачи. Доля считается по принятым байтам, а отметка о готовности
+  // появится после проверки файла.
+  func urlSession(_ session: URLSession, didCreateTask task: URLSessionTask) {
+    observation = task.progress.observe(\.fractionCompleted) { [weak self, weak task] _, _ in
+      guard let task, task.countOfBytesExpectedToReceive > 0 else { return }
+      self?.report(Double(task.countOfBytesReceived) / Double(task.countOfBytesExpectedToReceive))
+    }
   }
+
+  private func report(_ value: Double) {
+    guard value > 0, value < 1 else { return }
+    let now = ProcessInfo.processInfo.systemUptime
+    gate.withLock {
+      guard !stopped, value > lastValue, now - lastUpdate >= 0.08 else { return }
+      lastValue = value
+      lastUpdate = now
+      progress(value)
+    }
+  }
+
+  func stop() { gate.withLock { stopped = true } }
 }
 private final class StudioUploadProgress: NSObject, URLSessionTaskDelegate {
   private let size: Int64
@@ -260,10 +265,12 @@ final class NetworkAPI: @unchecked Sendable {
     let source = try request("/v1/media/" + blob)
     try Task.checkCancellation()
     progress?(0)
+    let observer = progress.map(MediaDownloadProgress.init)
+    defer { observer?.stop() }
     let (temporary, response) = try await read {
-      try await session.download(
-        for: source, delegate: progress.map { MediaDownloadProgress(progress: $0) })
+      try await session.download(for: source, delegate: observer)
     }
+    observer?.stop()
     defer { try? FileManager.default.removeItem(at: temporary) }
     guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
       throw RepoError.io
@@ -288,6 +295,7 @@ final class NetworkAPI: @unchecked Sendable {
     if !FileManager.default.fileExists(atPath: destination.path) {
       try FileManager.default.moveItem(at: temporary, to: destination)
     }
+    progress?(1)
   }
   // Проверяет номер файла и границы небольшого отрезка, просит точные байты и сверяет ответ.
   // Записывает сведения о чтении, чтобы отличить успешную передачу от отменённой.

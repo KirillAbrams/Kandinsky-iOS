@@ -73,4 +73,114 @@ final class StudioHistoryTests: XCTestCase {
     XCTAssertNil(cell.openButton.accessibilityValue)
     XCTAssertEqual(cell.openButton.frame.minX, 16)
   }
+
+  @MainActor func testHistoryAndArchiveCanRetryTheirOwnFailedReads() async throws {
+    let harness = try await RepositoryHarness.open()
+    let profile = NetworkProfile(
+      userId: 7, deviceId: "archive-fixture", name: "Проверка",
+      token: String(repeating: "a", count: 64), expiresAtMs: Int64.max)
+    let page = Data(
+      #"{"threads":[{"id":42,"title":"Сохранённый архив","lastSeq":4,"unreadCount":0,"pinned":false,"archived":true}]}"#.utf8)
+    let api = ScriptedHTTP.makeAPI([.response(503, Data()), .response(200, page)], profile: profile)
+    let sync = NetworkSync(profile: profile, store: harness.store, local: harness.repo, api: api)
+    defer { sync.close() }
+
+    let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+    let previous = scene.windows.first { $0.isKeyWindow }
+    let window = UIWindow(windowScene: scene)
+    let host = UIViewController()
+    window.rootViewController = host
+    window.makeKeyAndVisible()
+    defer {
+      host.dismiss(animated: false)
+      window.isHidden = true
+      window.rootViewController = nil
+      previous?.makeKey()
+    }
+    let opened = expectation(description: "Открыта карточка из ответа сервера")
+    let drawer = StudioHistoryController(
+      network: sync, selected: nil, onOpen: { chat in
+        XCTAssertEqual(chat, 42)
+        opened.fulfill()
+      }, onCompose: { XCTFail("Новый чат не запрашивался") },
+      onLogout: {}, onEraseAccount: {}, onDeleted: { _ in XCTFail("Чат не удалялся") })
+    host.present(drawer, animated: false)
+
+    let archive = try XCTUnwrap(findView("chats.archive", in: drawer.view) as? UIButton)
+    let table = try XCTUnwrap(findView("chats.rows", in: drawer.view) as? UITableView)
+    func waitForFooter(_ title: String) async throws -> UIButton {
+      for _ in 0..<150 {
+        if let footer = table.tableFooterView as? UIButton, footer.title(for: .normal) == title {
+          return footer
+        }
+        try await Task.sleep(for: .milliseconds(20))
+      }
+      let footer = table.tableFooterView as? UIButton
+      XCTAssertEqual(footer?.title(for: .normal), title, "Нижняя строка списка должна предложить повтор")
+      return try XCTUnwrap(footer)
+    }
+
+    let retryLocal = try await waitForFooter("Повторить загрузку")
+    XCTAssertTrue(retryLocal.isEnabled)
+    XCTAssertTrue(ScriptedHTTP.requests().isEmpty)
+    try await harness.store.perform { try NetworkSchema.install($0) }
+    try await sync.admitStudioThread(row(41, at: 10))
+    retryLocal.sendActions(for: .touchUpInside)
+    for _ in 0..<150 {
+      if drawer.numberOfSections(in: table) == 1,
+        drawer.tableView(table, numberOfRowsInSection: 0) == 1
+      { break }
+      try await Task.sleep(for: .milliseconds(20))
+    }
+    table.layoutIfNeeded()
+    let local = try XCTUnwrap(table.cellForRow(at: IndexPath(row: 0, section: 0)) as? StudioThreadCell)
+    XCTAssertEqual(local.openButton.title(for: .normal), row(41, at: 10).title)
+    XCTAssertTrue(ScriptedHTTP.requests().isEmpty)
+
+    archive.sendActions(for: .touchUpInside)
+    let retry = try await waitForFooter("Повторить загрузку")
+    XCTAssertTrue(retry.isEnabled)
+    retry.sendActions(for: .touchUpInside)
+
+    for _ in 0..<150 {
+      if drawer.numberOfSections(in: table) == 1, drawer.tableView(table, numberOfRowsInSection: 0) == 1 { break }
+      try await Task.sleep(for: .milliseconds(20))
+    }
+    XCTAssertEqual(drawer.numberOfSections(in: table), 1)
+    guard drawer.numberOfSections(in: table) == 1 else { return }
+    XCTAssertEqual(drawer.tableView(table, numberOfRowsInSection: 0), 1)
+    guard drawer.tableView(table, numberOfRowsInSection: 0) == 1 else { return }
+    let cell = try XCTUnwrap(drawer.tableView(table, cellForRowAt: IndexPath(row: 0, section: 0)) as? StudioThreadCell)
+    XCTAssertEqual(cell.openButton.title(for: .normal), "Сохранённый архив")
+    try await harness.store.perform { db in
+      try db.execute("""
+        CREATE TRIGGER refuse_archive_insert BEFORE INSERT ON net_chats
+        WHEN NEW.chatID=42 BEGIN SELECT RAISE(ABORT,'archive write refused'); END
+        """)
+    }
+    cell.openButton.sendActions(for: .touchUpInside)
+    let refused = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+      (drawer.presentedViewController as? UIAlertController)?.title == "Не удалось выполнить действие"
+    }, object: nil)
+    await fulfillment(of: [refused], timeout: 4)
+    let alert = try XCTUnwrap(drawer.presentedViewController as? UIAlertController)
+    XCTAssertEqual(alert.actions.map(\.title), ["Понятно"])
+    XCTAssertEqual(try harness.rawScalar("SELECT count(*) FROM net_chats WHERE chatID=42"), 0)
+    let closed = expectation(description: "Сообщение об ошибке закрыто")
+    alert.dismiss(animated: false) { closed.fulfill() }
+    await fulfillment(of: [closed], timeout: 4)
+    try await harness.store.perform { try $0.execute("DROP TRIGGER refuse_archive_insert") }
+    cell.openButton.sendActions(for: .touchUpInside)
+    await fulfillment(of: [opened], timeout: 4)
+    let requests = ScriptedHTTP.requests()
+    XCTAssertEqual(requests.map { $0.url?.path }, ["/v1/kandinsky/threads", "/v1/kandinsky/threads"])
+    XCTAssertEqual(requests.map { $0.url?.query }, Array(repeating: "view=archive&q=&offset=0&limit=30", count: 2))
+    XCTAssertEqual(try harness.rawScalar("SELECT count(*) FROM net_chats WHERE chatID=42"), 1)
+    try await harness.close()
+  }
+
+  @MainActor private func findView(_ id: String, in view: UIView) -> UIView? {
+    if view.accessibilityIdentifier == id { return view }
+    return view.subviews.lazy.compactMap { self.findView(id, in: $0) }.first
+  }
 }

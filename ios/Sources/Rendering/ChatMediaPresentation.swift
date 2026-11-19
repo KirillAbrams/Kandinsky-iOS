@@ -113,7 +113,7 @@ extension ChatScrollHost {
       viewer.modalPresentationStyle = .overFullScreen
       setMovingMediaVisible(false)
     } else {
-      setMediaVisible(false)
+      media.withNavigationCache { setMediaVisible(false) }
     }
     if row.kind != .video { playback.stop() }
     viewer.onReturn = { [weak self, weak viewer] in

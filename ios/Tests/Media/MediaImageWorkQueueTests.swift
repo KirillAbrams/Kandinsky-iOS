@@ -6,6 +6,54 @@ import ImageIO
 @testable import Kandinsky
 
 @MainActor final class MediaImageWorkQueueTests: XCTestCase {
+  func testThumbnailLimitKeepsSharedRequestsAndAcceptsAnotherAfterCancellation() async {
+    let requests = MediaThumbnailRequests()
+    defer { requests.clear() }
+    var starts = 0
+    let start: MediaThumbnailRequests.Start = { _, _, _, _ in
+      starts += 1
+      return MediaCancellation()
+    }
+    var cancelled = 0
+    let complete: (Result<PreparedImage, Error>) -> Void = { result in
+      switch result {
+      case .failure(let error): XCTAssertEqual(error as? MediaError, .cancelled)
+      case .success(let frame):
+        frame.close()
+        XCTFail("Отменённый запрос передал изображение")
+      }
+      cancelled += 1
+    }
+    let active = (0..<32).map { id in
+      requests.submit(
+        key: "thumbnail-\(id)", priority: 0, progress: { _ in }, start: start, completion: complete)
+    }
+    let shared = requests.submit(
+      key: "thumbnail-0", priority: 1, progress: { _ in }, start: start, completion: complete)
+    let refused = expectation(description: "Для отдельного изображения очередь заполнена")
+    _ = requests.submit(key: "next", priority: 1, progress: { _ in }, start: start) { result in
+      switch result {
+      case .failure(let error): XCTAssertEqual(error as? MediaError, .unavailable)
+      case .success(let frame):
+        frame.close()
+        XCTFail("Переполненная очередь приняла отдельное изображение")
+      }
+      refused.fulfill()
+    }
+    await fulfillment(of: [refused], timeout: 2)
+    XCTAssertEqual(starts, 32)
+    XCTAssertFalse(shared.isCancelled)
+    XCTAssertEqual(cancelled, 0)
+
+    active[1].cancel()
+    XCTAssertEqual(cancelled, 1)
+    _ = requests.submit(
+      key: "next", priority: 1, progress: { _ in }, start: start, completion: complete)
+    XCTAssertEqual(starts, 33)
+    requests.clear()
+    XCTAssertEqual(cancelled, 34)
+  }
+
   // Подписывает двух получателей на общую работу и снимает их из фонового потока. Первый уход не
   // мешает второму, а последний сразу останавливает передачу. Новый запрос начинает свою работу.
   func testLastSubscriberCancellationStopsSharedWorkBeforeMainQueueRuns() async {

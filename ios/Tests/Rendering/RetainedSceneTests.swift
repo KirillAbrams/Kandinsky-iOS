@@ -3,6 +3,7 @@
 
 import XCTest
 import UIKit
+import AVFoundation
 @testable import Kandinsky
 
 final class MessageTimestampTests: XCTestCase {
@@ -260,6 +261,149 @@ final class MessageTimestampTests: XCTestCase {
       prepared.close()
     }
   }
+  func testAlbumReorderingKeepsTheDecodedPhotoWithItsOwnFile() async throws {
+    let harness = try await RepositoryHarness.open()
+    let media = MediaStore(store: harness.store, studioOriginals: true)
+    let surface = CALayer()
+    let scene = RetainedChatScene(container: surface)
+    scene.mediaStore = media
+    let viewport = CGRect(x: 0, y: 0, width: 390, height: 844)
+    scene.viewport = viewport
+    scene.imageViewport = viewport
+    defer { scene.close(); media.close() }
+
+    let fixtures = try XCTUnwrap(
+      Bundle(for: RepositoryHarness.self).url(forResource: "fixtures", withExtension: nil))
+    let photos = try FileManager.default.contentsOfDirectory(
+      at: fixtures.appendingPathComponent("real-media"), includingPropertiesForKeys: nil)
+      .filter { $0.pathExtension == "jpg" }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+    XCTAssertGreaterThanOrEqual(photos.count, 3)
+    var attachments: [Attachment] = []
+    for photo in photos.prefix(3) {
+      let draft = try await media.stage(sourceURL: photo, mime: "image/jpeg")
+      attachments.append(Attachment(
+        id: draft.id, relativePath: draft.relativePath, mime: draft.mime, byteSize: draft.byteSize,
+        rawWidth: draft.rawWidth, rawHeight: draft.rawHeight,
+        orientation: draft.orientation, durationMs: nil, thumbnailKey: draft.thumbnailKey))
+    }
+
+    func frame(_ parts: [Attachment], revision: Int) -> SceneFragment {
+      let generation = StudioGeneration(
+        stage: .succeeded, model: "image", aspect: "1:1", startedAtMs: nil, error: nil,
+        slots: parts.map { .init(id: $0.id, status: .succeeded, blobId: $0.thumbnailKey, progress: nil) })
+      let row = Message(
+        id: 91, chatID: 2, order: OrderKey(sortKey: 91, messageID: 91),
+        direction: .incoming, savedAtMs: 1000, kind: .photo, text: "", caption: "",
+        replyToID: nil, revision: revision, attachments: parts, studioGeneration: generation)
+      let text = PreparedText(message: row,
+        key: TextLayoutKey(messageID: row.id, revision: revision, width: 320, fontSize: 17, scale: 2))
+      return SceneFragment(prepared: text, part: 0,
+        frame: CGRect(x: 12, y: 140, width: text.width, height: text.height))
+    }
+
+    let initial = frame(attachments, revision: 1)
+    scene.apply(SceneSnapshot(ticket: scene.ticket, fragments: [initial]))
+    let node = try XCTUnwrap(surface.sublayers?.compactMap { $0 as? MessageLayer }.first)
+    let first = try XCTUnwrap(node.image)
+    let second = try XCTUnwrap(node.extraImages[1])
+    let third = try XCTUnwrap(node.extraImages[2])
+    for _ in 0..<400 where !first.hasSharpFrame || !second.hasSharpFrame || !third.hasSharpFrame {
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    let firstFrame = try XCTUnwrap(first.preview())
+    let secondFrame = try XCTUnwrap(second.preview())
+    defer { firstFrame.close(); secondFrame.close() }
+    XCTAssertFalse(firstFrame.isTinyPreview)
+    XCTAssertFalse(secondFrame.isTinyPreview)
+
+    let reordered = frame([attachments[1], attachments[0]], revision: 2)
+    scene.apply(SceneSnapshot(ticket: scene.ticket, fragments: [reordered]))
+    XCTAssertTrue(node.image === second)
+    XCTAssertTrue(node.extraImages[1] === first)
+    XCTAssertNil(node.extraImages[2])
+    XCTAssertNil(third.preview())
+    let shown = try XCTUnwrap(scene.preview(91, attachmentIndex: 0))
+    defer { shown.close() }
+    XCTAssertTrue(shown.image === secondFrame.image)
+
+    let rect = try XCTUnwrap(reordered.prepared.mediaItemRects.first)
+      .offsetBy(dx: reordered.frame.minX, dy: reordered.frame.minY)
+    scene.imageViewport = CGRect(x: rect.minX + 4, y: rect.minY + 4, width: 12, height: 12)
+    scene.apply(SceneSnapshot(ticket: scene.ticket, fragments: [reordered]))
+    XCTAssertTrue(node.image === second)
+    XCTAssertNil(node.extraImages[1])
+    XCTAssertNil(first.preview())
+    scene.close()
+    try await harness.close()
+  }
+
+  func testMovingAnAlbumAboveTheViewportPausesOnlyTheHiddenVideos() async throws {
+    let harness = try await RepositoryHarness.open()
+    let media = MediaStore(store: harness.store, studioOriginals: true)
+    let surface = CALayer()
+    let scene = RetainedChatScene(container: surface)
+    scene.mediaStore = media
+    defer { scene.close(); media.close() }
+
+    let fixtures = try XCTUnwrap(
+      Bundle(for: RepositoryHarness.self).url(forResource: "fixtures", withExtension: nil))
+    let source = fixtures.appendingPathComponent(
+      "real-media/backend-990da02cd31e46cfb8fd630c293f3489.mp4")
+    var attachments: [Attachment] = []
+    for _ in 0..<4 {
+      let draft = try await media.stage(sourceURL: source, mime: "video/mp4")
+      attachments.append(Attachment(
+        id: draft.id, relativePath: draft.relativePath, mime: draft.mime, byteSize: draft.byteSize,
+        rawWidth: draft.rawWidth, rawHeight: draft.rawHeight, orientation: draft.orientation,
+        durationMs: draft.durationMs, thumbnailKey: draft.thumbnailKey))
+    }
+    let generation = StudioGeneration(
+      stage: .succeeded, model: "video", aspect: "1:1", startedAtMs: nil, error: nil,
+      slots: attachments.map {
+        .init(id: $0.id, status: .succeeded, blobId: $0.thumbnailKey, progress: nil)
+      })
+    let row = Message(
+      id: 92, chatID: 2, order: OrderKey(sortKey: 92, messageID: 92),
+      direction: .incoming, savedAtMs: 1000, kind: .video, text: "", caption: "",
+      replyToID: nil, revision: 1, attachments: attachments, studioGeneration: generation)
+    let text = PreparedText(message: row,
+      key: TextLayoutKey(messageID: row.id, revision: 1, width: 320, fontSize: 17, scale: 2))
+    let fragment = SceneFragment(prepared: text, part: 0,
+      frame: CGRect(x: 12, y: 140, width: text.width, height: text.height))
+    let topTile = try XCTUnwrap(text.mediaItemRects.first)
+    XCTAssertEqual(text.mediaItemRects.count, 4)
+    XCTAssertLessThan(topTile.minY, try XCTUnwrap(text.mediaItemRects.last).minY)
+    let viewport = CGRect(x: 0, y: 0, width: 390, height: 844)
+    scene.viewport = viewport
+    scene.imageViewport = viewport
+    let snapshot = SceneSnapshot(ticket: scene.ticket, fragments: [fragment])
+    scene.apply(snapshot)
+    let node = try XCTUnwrap(surface.sublayers?.compactMap { $0 as? MessageLayer }.first)
+    func players() -> [AVPlayerLayer] {
+      node.sublayers?.compactMap { $0 as? AVPlayerLayer } ?? []
+    }
+    let playing = players()
+    XCTAssertEqual(playing.count, 4)
+    let top = try XCTUnwrap(playing.first { $0.frame == topTile })
+    for _ in 0..<400 where (top.player?.currentTime().seconds ?? 0) < 0.15 {
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    XCTAssertGreaterThanOrEqual(top.player?.currentTime().seconds ?? 0, 0.15)
+    let offset = fragment.frame.minY + topTile.maxY + 1
+    scene.viewport = viewport.offsetBy(dx: 0, dy: offset)
+    scene.imageViewport = scene.viewport
+    scene.apply(snapshot)
+
+    XCTAssertNil(top.superlayer)
+    XCTAssertEqual(top.player?.rate ?? 0, 0)
+    XCTAssertEqual(players().count, 2)
+    XCTAssertTrue(players().allSatisfy { $0.frame.minY > topTile.minY })
+    let key = VideoPlaybackKey(messageID: row.id, attachment: attachments[0])
+    XCTAssertGreaterThanOrEqual(media.videoPlayback.position(key), 0.15)
+    scene.close()
+    try await harness.close()
+  }
+
   // Готовим фото с подписью и проверяем, что поверх фото не создан пустой слой меток. Иначе
   // каждое такое сообщение держало бы лишнюю поверхность.
   func testCaptionedPhotoDoesNotAllocateAnEmptyMetadataLayer() throws {

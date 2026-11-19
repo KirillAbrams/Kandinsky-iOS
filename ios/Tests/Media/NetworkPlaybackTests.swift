@@ -7,6 +7,53 @@ import CryptoKit
 @testable import Kandinsky
 
 @MainActor final class NetworkPlaybackTests: XCTestCase {
+  func testNativePlayerCanReopenAfterAnIncompleteVideoRange() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let fixtures = try XCTUnwrap(
+      Bundle(for: RepositoryHarness.self).url(forResource: "fixtures", withExtension: nil))
+    let bytes = try Data(contentsOf: fixtures.appendingPathComponent("media/video-00.mp4"))
+    let blob = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+    let original = root.appendingPathComponent("media/remote/" + blob + ".mp4")
+    let failedReads = NetworkRequestTally()
+    let incomplete = try MediaRangeCache(
+      root: root, blob: blob, length: Int64(bytes.count), original: original
+    ) { _, _, _ in
+      failedReads.increment()
+      return Data()
+    }
+    let first = MediaPlaybackSource(cache: incomplete, mime: "video/mp4", blob: blob)
+    let receivedFailure = expectation(description: "Проигрыватель получил ошибку чтения")
+    let opening = Task {
+      do {
+        _ = try await first.asset.load(.duration)
+        XCTFail("Проигрыватель принял неполную часть")
+      } catch {
+        XCTAssertGreaterThan(failedReads.count, 0)
+      }
+      receivedFailure.fulfill()
+    }
+    await fulfillment(of: [receivedFailure], timeout: 5)
+    first.close()
+    opening.cancel()
+    XCTAssertFalse(FileManager.default.fileExists(atPath: original.path))
+
+    let nextReads = NetworkRequestTally()
+    let restored = try MediaRangeCache(
+      root: root, blob: blob, length: Int64(bytes.count), original: original
+    ) { start, end, _ in
+      nextReads.increment()
+      return bytes.subdata(in: Int(start)..<Int(end + 1))
+    }
+    let next = MediaPlaybackSource(cache: restored, mime: "video/mp4", blob: blob)
+    defer { next.close() }
+    let playable = try await next.asset.load(.isPlayable)
+    let duration = try await next.asset.load(.duration)
+    XCTAssertTrue(playable)
+    XCTAssertGreaterThan(duration.seconds, 0)
+    XCTAssertGreaterThan(nextReads.count, 0)
+  }
+
   // Получаем недавнюю порцию медиа и сохраняем её во временной базе. Используем тот же разбор
   // ответа, который работает при открытии переписки.
   private func history(_ api: NetworkAPI, _ profile: NetworkProfile, _ h: RepositoryHarness)

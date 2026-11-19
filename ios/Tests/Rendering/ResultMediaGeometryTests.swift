@@ -83,10 +83,12 @@ final class ResultMediaGeometryTests: XCTestCase {
         rawWidth: 512, rawHeight: 512, orientation: 1, durationMs: nil, thumbnailKey: "third-file")
       // Готовим одно представление группы из заданных состояний и уже доступных файлов. Тот же
       // расчёт размеров позволяет сравнить разные стадии одной группы.
-      func prepare(_ slots: [StudioGeneration.Slot], _ media: [Attachment]) -> PreparedText {
+      func prepare(
+        _ slots: [StudioGeneration.Slot], _ media: [Attachment], aspect: String = "1:1"
+      ) -> PreparedText {
         let state = StudioGeneration(
           stage: slots.allSatisfy { $0.status == .succeeded } ? .succeeded : .running, model: model,
-          aspect: "1:1", startedAtMs: nil, error: nil, slots: slots)
+          aspect: aspect, startedAtMs: nil, error: nil, slots: slots)
         let row = Message(
           id: 1, chatID: 2, order: OrderKey(sortKey: 1, messageID: 1), direction: .incoming,
           savedAtMs: 0, kind: media.isEmpty ? .text : kind, text: "", caption: "", replyToID: nil,
@@ -132,6 +134,25 @@ final class ResultMediaGeometryTests: XCTestCase {
       XCTAssertEqual(failed.retryCells.map { $0.slot.id }, [ids[1]])
       XCTAssertEqual(failed.cells.map(\.frame), before.cells.map(\.frame))
       XCTAssertEqual(interrupted.height, initial.height)
+      var blockedSlots = advanced
+      blockedSlots[1] = .init(
+        id: ids[1], status: .failed, blobId: nil, progress: nil, moderated: true)
+      let blocked = prepare(blockedSlots, [attachment])
+      defer { blocked.close() }
+      XCTAssertTrue(try XCTUnwrap(blocked.generationCard).retryCells.isEmpty)
+      let button = try XCTUnwrap(failed.retryCells.first).frame
+      let (width, _, withRetry) = raster(interrupted)
+      let (blockedWidth, _, withoutRetry) = raster(blocked)
+      XCTAssertEqual(width, blockedWidth)
+      let pixel = (Int(button.midY + 12) * width + Int(button.midX - 28)) * 4
+      XCTAssertEqual(withRetry[pixel + 3], 255)
+      XCTAssertNotEqual(withRetry[pixel ..< pixel + 4], withoutRetry[pixel ..< pixel + 4])
+
+      let singlePortrait = prepare([waiting[0]], [], aspect: "9:16")
+      defer { singlePortrait.close() }
+      let portraitFrame = try XCTUnwrap(singlePortrait.generationCard?.cells.first?.frame)
+      XCTAssertEqual(portraitFrame.height, model == "video" ? 360 : 380, accuracy: 0.01)
+      XCTAssertEqual(portraitFrame.width / portraitFrame.height, 9.0 / 16, accuracy: 0.01)
 
       let allMedia = ids.map { id in
         Attachment(

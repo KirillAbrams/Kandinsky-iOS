@@ -5,6 +5,200 @@ import XCTest
 import UIKit
 @testable import Kandinsky
 @MainActor final class ReflowAnchorTests: XCTestCase {
+  func testHistoryOpensAfterThePreviousRepositoryWasClosed() async throws {
+    let unavailable = try await RepositoryHarness.open()
+    let available = try await RepositoryHarness.open()
+    try await unavailable.close()
+    _ = try await available.repo.send(
+      SendCommand(operationID: UUID().uuidString, chatID: 2, text: "Доступное сообщение"))
+    let host = ChatScrollHost()
+    host.frame = CGRect(x: 0, y: 0, width: 390, height: 800)
+    defer { host.close() }
+
+    do {
+      try await host.open(chatID: 2, repository: unavailable.repo, anchor: nil)
+      XCTFail("Закрытое хранилище не должно открывать пустую историю")
+    } catch let error as RepoError {
+      XCTAssertEqual(error, .cancelled)
+    }
+    XCTAssertEqual(host.messageCount, 0)
+    try await host.open(chatID: 2, repository: available.repo, anchor: nil)
+    XCTAssertEqual(host.messageCount, 1)
+    try await available.close()
+  }
+
+  func testLateIndexFromThePreviousOpenDoesNotReplaceCurrentHistory() async throws {
+    let older = try await RepositoryHarness.open()
+    let current = try await RepositoryHarness.open()
+    for (harness, messages) in [(older, ["Старая первая", "Старая вторая"]), (current, ["Новая"])] {
+      for text in messages {
+        _ = try await harness.repo.send(
+          SendCommand(operationID: UUID().uuidString, chatID: 2, text: text))
+      }
+    }
+    let entered = expectation(description: "Первое хранилище ждёт освобождения")
+    let gate = DispatchSemaphore(value: 0)
+    defer { gate.signal() }
+    let held = Task {
+      try await older.store.perform { _ in
+        entered.fulfill()
+        guard gate.wait(timeout: .now() + 10) == .success else { throw RepoError.cancelled }
+      }
+    }
+    await fulfillment(of: [entered], timeout: 5)
+
+    let host = ChatScrollHost()
+    host.frame = CGRect(x: 0, y: 0, width: 390, height: 800)
+    defer { host.close() }
+    let previousTicket = host.generation
+    let stale = Task { try await host.open(chatID: 2, repository: older.repo, anchor: nil) }
+    try await waitFor { host.generation > previousTicket }
+    try await host.open(chatID: 2, repository: current.repo, anchor: nil)
+    XCTAssertEqual(host.messageCount, 1)
+    gate.signal()
+    try await held.value
+    try await stale.value
+    XCTAssertEqual(host.messageCount, 1)
+    try await older.close()
+    try await current.close()
+  }
+
+  func testVoiceOverReportsTheSameIncomingPhotoWithoutOpeningIt() throws {
+    let host = ChatScrollHost()
+    host.frame = CGRect(x: 0, y: 0, width: 390, height: 800)
+    host.layoutIfNeeded()
+    defer { host.close() }
+    let attachment = Attachment(
+      id: "result", relativePath: "original.jpg", mime: "image/jpeg", byteSize: 300,
+      rawWidth: 80, rawHeight: 60, orientation: 1, durationMs: nil, thumbnailKey: "")
+    let message = Message(
+      id: 71, chatID: 2, order: OrderKey(sortKey: 71, messageID: 71),
+      direction: .incoming, savedAtMs: 0, kind: .photo, text: "", caption: "",
+      replyToID: nil, revision: 1, attachments: [attachment])
+    let prepared = PreparedText(
+      message: message, key: TextLayoutKey(messageID: 71, revision: 1, width: 320, fontSize: 17, scale: 1))
+    host.onStudioGenerationAction = { _, _ in }
+    host.onMessageTap = { _, _ in XCTFail("Жалоба не открывает файл") }
+    var reported: MessageID?
+    host.onMessageLongPress = { row, _ in reported = row.id }
+    var elements: [Any] = []
+    host.appendRowAccessibility(
+      message, layout: prepared, x: 16, rowY: 30, viewY: 30, elements: &elements)
+    let photo = try XCTUnwrap(elements.compactMap { $0 as? UIAccessibilityElement }.first {
+      $0.accessibilityIdentifier == "media.image.71"
+    })
+    XCTAssertEqual(photo.accessibilityLabel, "Открыть фотографию")
+    let report = try XCTUnwrap(photo.accessibilityCustomActions?.first)
+    XCTAssertEqual(report.name, "Пожаловаться на результат")
+    let perform = try XCTUnwrap(report.actionHandler)
+    XCTAssertTrue(perform(report))
+    XCTAssertEqual(reported, message.id)
+  }
+
+  func testVoiceOverOffersRetryOnlyForTheAvailableSlot() throws {
+    let host = ChatScrollHost()
+    host.frame = CGRect(x: 0, y: 0, width: 390, height: 800)
+    host.layoutIfNeeded()
+    defer { host.close() }
+    let failed = StudioGeneration.Slot(id: "failed", status: .failed, blobId: nil, progress: nil)
+    let running = StudioGeneration.Slot(id: "running", status: .running, blobId: nil, progress: 37)
+    let blocked = StudioGeneration.Slot(
+      id: "blocked", status: .failed, blobId: nil, progress: nil, moderated: true)
+    let generation = StudioGeneration(
+      stage: .running, model: "image_lite", aspect: "1:1", startedAtMs: nil, error: nil,
+      slots: [failed, running, blocked])
+    let message = Message(
+      id: 72, chatID: 2, order: OrderKey(sortKey: 72, messageID: 72),
+      direction: .incoming, savedAtMs: 0, kind: .text, text: "", caption: "",
+      replyToID: nil, revision: 1, attachments: [], studioGeneration: generation)
+    let prepared = PreparedText(
+      message: message, key: TextLayoutKey(messageID: 72, revision: 1, width: 320, fontSize: 17, scale: 1))
+
+    var receivedID: MessageID?
+    var receivedSlot: StudioGeneration.Slot?
+    host.onStudioRetrySlot = { id, slot in
+      XCTAssertNil(receivedSlot)
+      receivedID = id
+      receivedSlot = slot
+    }
+    var elements: [Any] = []
+    host.appendRowAccessibility(
+      message, layout: prepared, x: 16, rowY: 30, viewY: 30, elements: &elements)
+
+    func find(_ id: String) throws -> UIAccessibilityElement {
+      try XCTUnwrap(elements.compactMap { $0 as? UIAccessibilityElement }.first {
+        $0.accessibilityIdentifier == "generation.slot.72.\(id)"
+      })
+    }
+
+    let retry = try find(failed.id)
+    let progress = try find(running.id)
+    let moderated = try find(blocked.id)
+    XCTAssertEqual(retry.accessibilityLabel, "Повторить генерацию")
+    XCTAssertEqual(progress.accessibilityLabel, "37%")
+    XCTAssertTrue(retry.accessibilityTraits.contains(.button))
+    XCTAssertTrue(progress.accessibilityTraits.contains(.staticText))
+    XCTAssertTrue(moderated.accessibilityTraits.contains(.staticText))
+    XCTAssertTrue(retry.accessibilityActivate())
+    XCTAssertFalse(progress.accessibilityActivate())
+    XCTAssertFalse(moderated.accessibilityActivate())
+    XCTAssertEqual(receivedID, message.id)
+    XCTAssertEqual(receivedSlot, failed)
+  }
+
+  func testVoiceOverRoutesExpansionRetryAndThePromptMenuToTheirOwnRows() throws {
+    let host = ChatScrollHost()
+    host.frame = CGRect(x: 0, y: 0, width: 390, height: 800)
+    host.layoutIfNeeded()
+    defer { host.close() }
+    let video = Attachment(
+      id: "result-video", relativePath: "video.mp4", mime: "video/mp4", byteSize: 300,
+      rawWidth: 160, rawHeight: 90, orientation: 1, durationMs: 3000, thumbnailKey: "video")
+    let result = Message(
+      id: 73, chatID: 2, order: OrderKey(sortKey: 73, messageID: 73),
+      direction: .incoming, savedAtMs: 0, kind: .video, text: "", caption: "",
+      replyToID: nil, revision: 1, attachments: [video])
+    let failure = Message(
+      id: 74, chatID: 2, order: OrderKey(sortKey: 74, messageID: 74),
+      direction: .incoming, savedAtMs: 0, kind: .text, text: "", caption: "",
+      replyToID: nil, revision: 1, attachments: [],
+      studioGeneration: StudioGeneration(
+        stage: .failed, model: "image_lite", aspect: "1:1", startedAtMs: nil,
+        error: "Сервер не завершил запрос"))
+    let prompt = Message(
+      id: 75, chatID: 2, order: OrderKey(sortKey: 75, messageID: 75),
+      direction: .outgoing, savedAtMs: 0, kind: .text, text: "Ночной город", caption: "",
+      replyToID: nil, revision: 1, attachments: [])
+    var opened: [MessageID] = []
+    var menus: [MessageID] = []
+    var retries: [MessageID] = []
+    host.onMessageTap = { row, _ in opened.append(row.id) }
+    host.onMessageLongPress = { row, _ in menus.append(row.id) }
+    host.onStudioResultDelete = { _, _ in XCTFail("Открытие меню не удаляет файл") }
+    host.onStudioGenerationAction = { id, action in
+      XCTAssertEqual(action, .retry)
+      retries.append(id)
+    }
+
+    var elements: [Any] = []
+    for (row, y) in [(result, 24.0), (failure, 380.0), (prompt, 610.0)] {
+      let layout = PreparedText(message: row, key: TextLayoutKey(
+        messageID: row.id, revision: 1, width: 320, fontSize: 17, scale: 1))
+      host.appendRowAccessibility(
+        row, layout: layout, x: 16, rowY: y, viewY: y, elements: &elements)
+    }
+
+    for id in ["media.action.expand.73", "generation.action.retry.74", "message.75"] {
+      let button = try XCTUnwrap(elements.compactMap { $0 as? UIAccessibilityElement }
+        .first { $0.accessibilityIdentifier == id })
+      XCTAssertTrue(button.accessibilityTraits.contains(.button))
+      XCTAssertTrue(button.accessibilityActivate())
+    }
+    XCTAssertEqual(opened, [73])
+    XCTAssertEqual(retries, [74])
+    XCTAssertEqual(menus, [75])
+  }
+
   // Проводим соседнее сообщение через край экрана и прокручиваем обратно. Сравниваем тот же
   // готовый рисунок и проверяем, что слой освобождается после закрытия.
   func testNearbyRowKeepsPreparedBitmapThroughEntryAndReversal() async throws {
@@ -483,6 +677,13 @@ import UIKit
         "Retained media actions must read the current viewport, not the offset captured when they were created"
       )
     }
+    do {
+      let element = try XCTUnwrap(media("media.audio.2"))
+      let currentFrame = element.accessibilityFrameInContainerSpace
+      XCTAssertTrue(element.accessibilityActivate())
+      XCTAssertEqual(activation?.0, 2)
+      XCTAssertEqual(activation?.1, currentFrame.offsetBy(dx: 0, dy: -12))
+    }
     host.close()
     try await waitFor { photo == nil && voice == nil && round == nil }
     try await h.close()
@@ -806,6 +1007,79 @@ import UIKit
       ready.fulfill()
     }
     await fulfillment(of: [ready, cancelled], timeout: 0.25)
+  }
+
+  func testFullLayoutQueueKeepsTheVisibleRequestAndAnswersEveryCancellationOnce() async {
+    let worker = TextLayoutWorker()
+    let longText = String(repeating: "مرحبا сообщение 👨‍👩‍👧‍👦 café ", count: 6_000)
+    let allReplies = expectation(description: "Каждый запрос разметки получил один ответ")
+    allReplies.expectedFulfillmentCount = 38
+    allReplies.assertForOverFulfill = true
+
+    func key(_ id: Int) -> TextLayoutKey {
+      TextLayoutKey(messageID: Int64(id), revision: 1, width: 200, fontSize: 18, scale: 3)
+    }
+
+    func submit(_ id: Int, text: String = "Строка истории", cancelled: Bool = false)
+      -> TextLayoutCancellation
+    {
+      let row = Message(
+        id: Int64(id), chatID: 4, order: OrderKey(sortKey: Int64(id), messageID: Int64(id)),
+        direction: .incoming, savedAtMs: 1, kind: .text, text: text, caption: "",
+        replyToID: nil, revision: 1, attachments: [])
+      return worker.prepare(message: row, key: key(id), ticket: id) { ticket, resource in
+        XCTAssertEqual(ticket, id)
+        if cancelled { XCTAssertNil(resource) }
+        resource?.close()
+        allReplies.fulfill()
+      }
+    }
+
+    let running = [submit(1, text: longText), submit(2, text: longText)]
+    let firstOffscreen = submit(3, cancelled: true)
+    for id in 4...34 { _ = submit(id) }
+    firstOffscreen.cancel()
+    let farthest = submit(35, cancelled: true)
+    let excess = submit(36, cancelled: true)
+    XCTAssertTrue(excess.isCancelled)
+
+    worker.prioritizeVisible([key(37)])
+    let visible = submit(37)
+    XCTAssertTrue(farthest.isCancelled)
+    XCTAssertFalse(visible.isCancelled)
+    running.forEach { $0.cancel() }
+    worker.close()
+    _ = submit(38, cancelled: true)
+    await fulfillment(of: [allReplies], timeout: 8)
+  }
+
+  func testLayoutCacheReplacesIdenticalKeysAndEvictsTheLeastRecentLayout() {
+    func layout(_ id: Int64) -> PreparedText {
+      let row = Message(
+        id: id, chatID: 4, order: OrderKey(sortKey: id, messageID: id), direction: .incoming,
+        savedAtMs: 1, kind: .text, text: "Разметка строки", caption: "", replyToID: nil,
+        revision: 1, attachments: [])
+      return PreparedText(
+        message: row,
+        key: TextLayoutKey(messageID: id, revision: 1, width: 200, fontSize: 18, scale: 3))
+    }
+    let cache = FragmentLayoutCache()
+    let first = layout(1), second = layout(2), third = layout(3), replacement = layout(1)
+    cache.limit = first.byteCost + second.byteCost
+    cache.insert(first)
+    cache.insert(second)
+    cache.insert(replacement)
+    XCTAssertTrue(cache.value(first.key) === replacement)
+    XCTAssertEqual(cache.bytes, replacement.byteCost + second.byteCost)
+
+    cache.insert(third)
+    XCTAssertNil(cache.value(second.key))
+    XCTAssertTrue(cache.value(first.key) === replacement)
+    XCTAssertTrue(cache.value(third.key) === third)
+    XCTAssertEqual(cache.bytes, replacement.byteCost + third.byteCost)
+    cache.clear()
+    XCTAssertEqual(cache.bytes, 0)
+    XCTAssertNil(cache.value(first.key))
   }
   // Проверяем условие через короткие паузы до шести секунд. Отсутствие готового рисунка
   // становится ошибкой проверки вместо бесконечного ожидания.

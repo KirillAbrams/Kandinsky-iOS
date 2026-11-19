@@ -109,6 +109,79 @@ import UIKit
     try await h.close()
   }
 
+  func testCancellationDiscardsAnAlreadyPinnedLocalVideoWithoutStartingNetworkPlayback() async throws {
+    final class WaitingLocalFile: MediaFileProvider, @unchecked Sendable {
+      let url: URL
+      let entered: XCTestExpectation
+      let released: XCTestExpectation
+      let resume = DispatchSemaphore(value: 0)
+
+      init(url: URL, entered: XCTestExpectation, released: XCTestExpectation) {
+        self.url = url
+        self.entered = entered
+        self.released = released
+      }
+
+      func cached(_ attachment: Attachment, preview: Bool, token: MediaCancellation) throws
+        -> (URL, String)?
+      {
+        token.onCancel { [released] in released.fulfill() }
+        entered.fulfill()
+        guard resume.wait(timeout: .now() + 5) == .success else { throw MediaError.io }
+        return (url, attachment.mime)
+      }
+
+      func resolve(_ attachment: Attachment, preview: Bool, token: MediaCancellation) throws
+        -> (URL, String)
+      {
+        XCTFail("Отмена местного воспроизведения не должна запускать загрузку")
+        throw MediaError.unavailable
+      }
+    }
+
+    let harness = try await RepositoryHarness.open()
+    let media = MediaStore(store: harness.store)
+    let source = try XCTUnwrap(
+      Bundle(for: RepositoryHarness.self).url(forResource: "fixtures", withExtension: nil))
+      .appendingPathComponent("real-media/backend-990da02cd31e46cfb8fd630c293f3489.mp4")
+    let draft = try await media.stage(sourceURL: source, mime: "video/mp4")
+    let attachment = Attachment(
+      id: draft.id, relativePath: draft.relativePath, mime: draft.mime, byteSize: draft.byteSize,
+      rawWidth: draft.rawWidth, rawHeight: draft.rawHeight, orientation: draft.orientation,
+      durationMs: draft.durationMs, thumbnailKey: draft.thumbnailKey)
+    let original = try media.fileURL(attachment.relativePath)
+    let entered = expectation(description: "Чтение удерживает оригинал")
+    let released = expectation(description: "Отмена снимает удержание оригинала")
+    released.assertForOverFulfill = true
+    let local = WaitingLocalFile(url: original, entered: entered, released: released)
+    media.remoteThumbnailProvider = local
+    media.remotePlayback = { _, _ in
+      XCTFail("Местный просмотр не должен обращаться к сети")
+      throw MediaError.unavailable
+    }
+    defer { local.resume.signal(); media.close() }
+
+    let opening = Task { try await media.playbackSource(attachment, localOnly: true) }
+    await fulfillment(of: [entered], timeout: 3)
+    opening.cancel()
+    await fulfillment(of: [released], timeout: 3)
+    local.resume.signal()
+    switch await opening.result {
+    case .success(let obsolete):
+      obsolete.close()
+      XCTFail("Отменённый источник нельзя отдать проигрывателю")
+    case .failure(let error):
+      XCTAssertEqual(error as? MediaError, .cancelled)
+    }
+
+    media.remoteThumbnailProvider = nil
+    let next = try await media.playbackSource(attachment, localOnly: true)
+    XCTAssertEqual(next.localFile, original)
+    next.close()
+    XCTAssertEqual(try Data(contentsOf: original), try Data(contentsOf: source))
+    try await harness.close()
+  }
+
   func testInlinePhotoTapDoesNotCancelDownloadAfterProgress() async throws {
     let harness = try await RepositoryHarness.open()
     let media = MediaStore(store: harness.store)

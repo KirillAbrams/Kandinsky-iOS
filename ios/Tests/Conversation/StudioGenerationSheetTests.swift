@@ -104,6 +104,58 @@ import XCTest
     )])
   }
 
+  func testAccessibilityEscapeClosesSettingsWithoutApplyingAnUnconfirmedFormat() async throws {
+    try await withPresentationHost { host in
+      let sheet = StudioGenerationSheet(options: KandinskyOptions(model: "image", aspect: "5:3"))
+      let limits = StudioCapabilities(
+        quality: [], resolutions: [], aspects: ["5:3", "3:5"], duration_seconds: [],
+        max_count: 1, negative_prompt: false, guidance: nil)
+      var submitted: [KandinskyOptions] = []
+      sheet.showSettings(limits, onCountChange: { _ in }) { submitted.append($0) }
+      host.present(sheet, animated: false)
+      XCTAssertTrue(sheet.view.accessibilityViewIsModal)
+      let newFormat = try button("3:5", in: sheet)
+      newFormat.sendActions(for: .touchUpInside)
+      XCTAssertTrue(newFormat.isSelected)
+      XCTAssertTrue(sheet.accessibilityPerformEscape())
+      let dismissed = XCTNSPredicateExpectation(
+        predicate: NSPredicate { _, _ in host.presentedViewController == nil }, object: nil)
+      await fulfillment(of: [dismissed], timeout: 4)
+      XCTAssertTrue(submitted.isEmpty)
+    }
+  }
+
+  func testLongQualityChoicesWrapAndKeepTheirSelectionWhenThePanelWidens() throws {
+    let sheet = StudioGenerationSheet(options: KandinskyOptions(model: "video", quality: "standard"))
+    let choices = [
+      StudioChoice(id: "standard", name: "Быстрая генерация", sizes: nil),
+      StudioChoice(id: "high", name: "Высокое качество", sizes: nil)
+    ]
+    let limits = StudioCapabilities(
+      quality: choices, resolutions: [], aspects: ["1:1"], duration_seconds: [],
+      max_count: 1, negative_prompt: false, guidance: nil)
+    var saved: KandinskyOptions?
+    sheet.showSettings(limits, onCountChange: { _ in }) { saved = $0 }
+    func layout(width: CGFloat) {
+      sheet.view.frame = CGRect(x: 0, y: 0, width: width, height: 760)
+      sheet.view.setNeedsLayout()
+      sheet.view.layoutIfNeeded()
+    }
+
+    layout(width: 320)
+    let standard = try button(choices[0].name, in: sheet)
+    let high = try button(choices[1].name, in: sheet)
+    XCTAssertGreaterThan(standard.frame.width, 0)
+    XCTAssertGreaterThanOrEqual(high.frame.minY, standard.frame.maxY)
+    high.sendActions(for: .touchUpInside)
+    layout(width: 640)
+    XCTAssertEqual(high.frame.minY, standard.frame.minY, accuracy: 0.5)
+    XCTAssertGreaterThan(high.frame.minX, standard.frame.maxX)
+    XCTAssertTrue(high.isSelected)
+    try button("Готово", in: sheet).sendActions(for: .touchUpInside)
+    XCTAssertEqual(saved?.quality, "high")
+  }
+
   // Передаёт прежние значения модели с урезанным набором возможностей. Проверяет скрытые поля и
   // замену недоступных вариантов, чтобы они не ушли в запрос.
   func testRemovedCapabilitiesDiscardStaleOptions() throws {

@@ -22,6 +22,43 @@ final class AccountEntryUITests: XCTestCase {
     XCTAssertTrue(app.textViews["composer.input"].waitForExistence(timeout: 20))
   }
 
+  private func selectModel(_ name: String, in app: XCUIApplication) {
+    app.buttons["composer.model"].tap()
+    let model = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", name)).firstMatch
+    XCTAssertTrue(model.waitForExistence(timeout: 8))
+    model.tap()
+  }
+
+  private func enterSeed(_ value: String, in field: XCUIElement) {
+    field.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+    if let previous = field.value as? String, previous.allSatisfy(\.isNumber), !previous.isEmpty {
+      field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: previous.count))
+    }
+    field.typeText(value)
+  }
+
+  private func queuedResult(in app: XCUIApplication) -> XCUIElement {
+    app.staticTexts.matching(
+      NSPredicate(
+        format: "identifier BEGINSWITH %@ AND label BEGINSWITH %@", "generation.slot.", "В очереди")
+    ).firstMatch
+  }
+
+  @discardableResult
+  private func stopQueuedResult(in app: XCUIApplication) throws -> String {
+    let queued = queuedResult(in: app)
+    XCTAssertTrue(queued.waitForExistence(timeout: 25))
+    let id = try XCTUnwrap(queued.identifier.split(separator: ".").dropFirst(2).first)
+    let composerAction = app.buttons["composer.send"]
+    let stop = XCTNSPredicateExpectation(
+      predicate: NSPredicate(format: "label == %@", "Остановить генерацию"), object: composerAction)
+    XCTAssertEqual(XCTWaiter.wait(for: [stop], timeout: 8), .completed)
+    composerAction.tap()
+    XCTAssertTrue(app.buttons["generation.action.retry.\(id)"].waitForExistence(timeout: 15))
+    XCTAssertFalse(queued.exists)
+    return String(id)
+  }
+
   // Ждёт изменения подписи оставшегося времени. Неподвижная заставка с прежним временем так не
   // пройдёт проверку проигрывания.
   private func assertPreviewIsPlaying(_ app: XCUIApplication) {
@@ -75,6 +112,32 @@ final class AccountEntryUITests: XCTestCase {
     add(attachments)
   }
 
+  func testAnUnsentNewChatDraftSurvivesGoingHomeAndRelaunching() throws {
+    continueAfterFailure = false
+    let app = XCUIApplication()
+    app.launch()
+    try openFixtureHistory(app)
+    app.buttons["chat.compose"].tap()
+    let example = app.buttons["chat.welcome"]
+    XCTAssertTrue(example.waitForExistence(timeout: 10))
+    example.tap()
+    let editor = app.textViews["composer.input"]
+    let draft = "Белая магнолия у окна, мягкий дневной свет, минималистичная фотография"
+    XCTAssertEqual(editor.value as? String, draft)
+    XCUIDevice.shared.press(.home)
+    XCTAssertTrue(app.wait(for: .runningBackground, timeout: 10))
+    app.activate()
+    XCTAssertTrue(editor.waitForExistence(timeout: 12))
+    XCTAssertEqual(editor.value as? String, draft)
+
+    app.terminate()
+    app.launch()
+    XCTAssertTrue(editor.waitForExistence(timeout: 12))
+    XCTAssertEqual(editor.value as? String, draft)
+    XCTAssertTrue(example.exists)
+    XCTAssertFalse(queuedResult(in: app).exists)
+  }
+
   // Открывает просмотр недавнего ролика и выбирает уже загруженный снимок в новой истории.
   // Проверяет отправку с исходником и отменяет созданное задание.
   func testRecentUploadsReusePhotoAndPreviewVideo() throws {
@@ -112,12 +175,7 @@ final class AccountEntryUITests: XCTestCase {
     composer.tap()
     composer.typeText(marker)
     app.buttons["composer.send"].tap()
-    let cancel = app.buttons.matching(
-      NSPredicate(format: "identifier BEGINSWITH %@", "generation.action.cancel.")
-    ).firstMatch
-    XCTAssertTrue(cancel.waitForExistence(timeout: 24))
-    cancel.tap()
-    XCTAssertTrue(app.staticTexts["Генерация отменена"].waitForExistence(timeout: 15))
+    try stopQueuedResult(in: app)
   }
 
   // Выбирает и убирает недавний снимок, затем запускает, разворачивает и закрывает видео.
@@ -206,10 +264,8 @@ final class AccountEntryUITests: XCTestCase {
     plus.tap()
     XCTAssertTrue(
       app.buttons["Использовать загруженное фото"].firstMatch.waitForExistence(timeout: 12))
-    XCTAssertFalse(
-      app.buttons.matching(
-        NSPredicate(format: "identifier BEGINSWITH %@", "generation.action.cancel.")
-      ).firstMatch.exists)
+    XCTAssertFalse(queuedResult(in: app).exists)
+    XCTAssertNotEqual(app.buttons["composer.send"].label, "Остановить генерацию")
   }
 
   // Нажимает на описание вложения и проверяет, что источник остался. Удаляет его отдельной
@@ -276,12 +332,7 @@ final class AccountEntryUITests: XCTestCase {
     composer.tap()
     composer.typeText(marker)
     app.buttons["composer.send"].tap()
-    let cancel = app.buttons.matching(
-      NSPredicate(format: "identifier BEGINSWITH %@", "generation.action.cancel.")
-    ).firstMatch
-    XCTAssertTrue(cancel.waitForExistence(timeout: 26))
-    cancel.tap()
-    XCTAssertTrue(app.staticTexts["Генерация отменена"].waitForExistence(timeout: 15))
+    try stopQueuedResult(in: app)
   }
 
   // Выбирает видео, открывает его приглушённый просмотр и разворачивает. После возврата проверяет
@@ -334,6 +385,73 @@ final class AccountEntryUITests: XCTestCase {
     XCTAssertFalse(expand.exists)
   }
 
+  func testSmallVideoWithoutAnEnhancementModelKeepsTheDraftEditable() throws {
+    let environment = ProcessInfo.processInfo.environment
+    guard let origin = environment["KANDINSKY_TEST_ORIGIN"],
+      URLComponents(string: origin)?.host == "127.0.0.1",
+      environment["KANDINSKY_TEST_NO_VIDEO_ENHANCER"] == "1"
+    else { throw XCTSkip("Нужен местный сервер без модели улучшения видео") }
+    continueAfterFailure = false
+    let app = XCUIApplication()
+    app.launch()
+    try openFixtureHistory(app)
+    app.buttons["chat.compose"].tap()
+    let composer = app.textViews["composer.input"]
+    XCTAssertTrue(composer.waitForExistence(timeout: 10))
+    let draft = "Черновик рядом с коротким видео"
+    composer.tap()
+    composer.typeText(draft)
+    app.buttons["composer.plus"].tap()
+    let source = app.buttons.matching(
+      NSPredicate(format: "label BEGINSWITH %@", "Загрузить и посмотреть видео")).firstMatch
+    XCTAssertTrue(source.waitForExistence(timeout: 8))
+    source.tap()
+    let clip = app.images.matching(
+      NSPredicate(format: "label BEGINSWITH[c] %@", "Video, two seconds")).firstMatch
+    XCTAssertTrue(clip.waitForExistence(timeout: 10))
+    tapPickerThumbnail(clip, in: app)
+    let enhance = app.buttons["studio.upload.enhance"]
+    XCTAssertTrue(enhance.waitForExistence(timeout: 22))
+    enhance.tap()
+    let feedback = app.staticTexts["studio.attachment.error"]
+    XCTAssertTrue(feedback.waitForExistence(timeout: 12))
+    XCTAssertEqual(feedback.label, "Улучшение видео сейчас недоступно")
+    XCTAssertTrue(composer.waitForExistence(timeout: 8))
+    XCTAssertEqual(composer.value as? String, draft)
+    XCTAssertFalse(app.buttons["studio.reference.remove"].exists)
+    XCTAssertFalse(queuedResult(in: app).exists)
+  }
+
+  func testARefusedThreadCreationKeepsThePromptForAnotherAttempt() throws {
+    let environment = ProcessInfo.processInfo.environment
+    guard let origin = environment["KANDINSKY_TEST_ORIGIN"],
+      URLComponents(string: origin)?.host == "127.0.0.1",
+      environment["KANDINSKY_TEST_REFUSE_THREAD"] == "1"
+    else { throw XCTSkip("Нужен местный стенд с одним отказом создания чата") }
+    continueAfterFailure = false
+    let app = XCUIApplication()
+    app.launch()
+    app.buttons["chat.compose"].tap()
+    XCTAssertTrue(app.buttons["chat.welcome"].waitForExistence(timeout: 10))
+    let composer = app.textViews["composer.input"]
+    let prompt = "FirstThreadQA" + UUID().uuidString.prefix(8)
+    composer.tap()
+    composer.typeText(prompt)
+    let send = app.buttons["composer.send"]
+    send.tap()
+    let failure = app.alerts["Не удалось начать историю"]
+    XCTAssertTrue(failure.waitForExistence(timeout: 12))
+    failure.buttons["Понятно"].tap()
+    XCTAssertEqual(composer.value as? String, prompt)
+    XCTAssertFalse(queuedResult(in: app).exists)
+    send.tap()
+    let accepted = app.buttons.matching(
+      NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "message.", prompt)
+    ).firstMatch
+    XCTAssertTrue(accepted.waitForExistence(timeout: 18))
+    try stopQueuedResult(in: app)
+  }
+
   // Создаёт первый запрос, ждёт его в очереди, отменяет и повторяет. Сверяет привязку действия к
   // прежней строке и появление нового запуска.
   func testFirstStudioPromptReachesTheQueue() throws {
@@ -351,7 +469,9 @@ final class AccountEntryUITests: XCTestCase {
     composer.typeText(marker)
     XCTAssertEqual(composer.value as? String, marker)
     app.buttons["composer.send"].tap()
-    let sent = app.staticTexts.matching(NSPredicate(format: "label == %@", marker)).firstMatch
+    let sent = app.buttons.matching(
+      NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "message.", marker)
+    ).firstMatch
     if !sent.waitForExistence(timeout: 18) {
       let diagnostic = XCTAttachment(screenshot: app.screenshot())
       diagnostic.name = "Native Kandinsky — after first submission"
@@ -361,35 +481,42 @@ final class AccountEntryUITests: XCTestCase {
       XCTFail("The first prompt is not visible")
       return
     }
-    let queued = app.staticTexts["В очереди"]
-    XCTAssertTrue(queued.waitForExistence(timeout: 25))
-    let cancel = app.buttons.matching(
-      NSPredicate(format: "identifier BEGINSWITH %@", "generation.action.cancel.")
-    ).firstMatch
-    XCTAssertTrue(cancel.waitForExistence(timeout: 8))
+    XCTAssertTrue(queuedResult(in: app).waitForExistence(timeout: 25))
+    let originalRequest = app.buttons[sent.identifier]
     let waitingEvidence = XCTAttachment(screenshot: app.screenshot())
     waitingEvidence.name = "Native Kandinsky — waiting for generation"
     waitingEvidence.lifetime = .keepAlways
     add(waitingEvidence)
-    let originalAction = cancel.identifier
-    cancel.tap()
-    XCTAssertTrue(app.staticTexts["Генерация отменена"].waitForExistence(timeout: 15))
-    let retry = app.buttons.matching(
-      NSPredicate(format: "identifier BEGINSWITH %@", "generation.action.retry.")
-    ).firstMatch
-    XCTAssertTrue(retry.waitForExistence(timeout: 8))
-    XCTAssertEqual(
-      originalAction.split(separator: ".").last, retry.identifier.split(separator: ".").last)
+    let originalResult = try stopQueuedResult(in: app)
+    let retry = app.buttons["generation.action.retry.\(originalResult)"]
     let cancelledEvidence = XCTAttachment(screenshot: app.screenshot())
     cancelledEvidence.name = "Native Kandinsky — cancelled generation"
     cancelledEvidence.lifetime = .keepAlways
     add(cancelledEvidence)
     retry.tap()
-    XCTAssertTrue(queued.waitForExistence(timeout: 20))
-    XCTAssertTrue(cancel.waitForExistence(timeout: 8))
-    XCTAssertNotEqual(originalAction, cancel.identifier)
-    cancel.tap()
-    XCTAssertFalse(cancel.waitForExistence(timeout: 2))
+    let replacement = try stopQueuedResult(in: app)
+    XCTAssertNotEqual(replacement, originalResult)
+
+    let remove = app.buttons.matching(NSPredicate(format: "label == %@", "Удалить запрос"))
+      .firstMatch
+    let confirmation = app.alerts["Удалить запрос?"]
+    func askToDelete() {
+      originalRequest.press(forDuration: 0.7)
+      XCTAssertTrue(remove.waitForExistence(timeout: 8))
+      remove.tap()
+      XCTAssertTrue(confirmation.waitForExistence(timeout: 8))
+    }
+    askToDelete()
+    confirmation.buttons["Отмена"].tap()
+    XCTAssertTrue(originalRequest.waitForExistence(timeout: 8))
+    askToDelete()
+    confirmation.buttons["Удалить"].tap()
+    let deleted = XCTNSPredicateExpectation(
+      predicate: NSPredicate(format: "exists == false"), object: originalRequest)
+    XCTAssertEqual(XCTWaiter.wait(for: [deleted], timeout: 15), .completed)
+    XCTAssertFalse(app.buttons["generation.action.retry.\(originalResult)"].exists)
+    XCTAssertTrue(app.buttons["generation.action.retry.\(replacement)"].exists)
+    XCTAssertTrue(composer.exists)
   }
 
   // Сверяет размеры кнопки отправки, панели и новой истории. После закрытия панели отправка снова
@@ -423,6 +550,7 @@ final class AccountEntryUITests: XCTestCase {
   // Запоминает положение видимой фразы, сверяет поля поиска и архива в боковой панели и возвращается
   // в чат. Повторный показ сохраняет высоту той же строки.
   func testStudioDrawerReturnsToTheSameHistoryPosition() throws {
+    continueAfterFailure = false
     let app = XCUIApplication()
     app.launch()
     try openFixtureHistory(app)
@@ -432,13 +560,22 @@ final class AccountEntryUITests: XCTestCase {
     ).firstMatch
     let burger = app.buttons["chat.back"]
     XCTAssertTrue(burger.waitForExistence(timeout: 20))
-    let prompts = app.staticTexts.matching(
+    let history = app.scrollViews["chat.history"]
+    let prompts = history.descendants(matching: .any).matching(
       NSPredicate(format: "identifier BEGINSWITH %@", "message."))
-    let prompt = try XCTUnwrap(prompts.allElementsBoundByIndex.first(where: { $0.isHittable }))
-    let id = prompt.identifier
-    let position = prompt.frame.minY
+    XCTAssertTrue(prompts.firstMatch.waitForExistence(timeout: 10))
+    let initialPrompts = Set(prompts.allElementsBoundByIndex.map(\.identifier))
+    let scrollStart = history.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.25))
+    let scrollEnd = history.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.75))
+    scrollStart.press(forDuration: 0.1, thenDragTo: scrollEnd)
+    let olderPrompts = prompts.matching(
+      NSPredicate(format: "NOT (identifier IN %@)", Array(initialPrompts)))
+    XCTAssertTrue(olderPrompts.firstMatch.waitForExistence(timeout: 12))
+    let olderPrompt = try XCTUnwrap(olderPrompts.allElementsBoundByIndex.first(where: { $0.isHittable }))
+    let id = olderPrompt.identifier
+    let position = olderPrompt.frame.minY
     burger.tap()
-    let close = app.buttons["chats.drawer.close"]
+    let close = app.buttons["chats.header.close"]
     XCTAssertTrue(close.waitForExistence(timeout: 5))
     XCTAssertTrue(app.textFields["chats.search.field"].exists)
     XCTAssertTrue(app.buttons["chats.archive"].exists)
@@ -449,9 +586,139 @@ final class AccountEntryUITests: XCTestCase {
     add(capture)
     close.tap()
     XCTAssertTrue(burger.waitForExistence(timeout: 8))
-    let returned = app.staticTexts[id]
+    let returned = history.descendants(matching: .any).matching(identifier: id).firstMatch
     XCTAssertTrue(returned.waitForExistence(timeout: 10))
     XCTAssertEqual(returned.frame.minY, position, accuracy: 1)
+  }
+
+  func testSubmittingHistorySearchKeepsTheQueryAndHidesTheKeyboard() throws {
+    continueAfterFailure = false
+    let app = XCUIApplication()
+    app.launch()
+    try openFixtureHistory(app)
+    app.buttons["chat.back"].tap()
+    let search = app.textFields["chats.search.field"]
+    XCTAssertTrue(search.waitForExistence(timeout: 8))
+    search.tap()
+    search.typeText("Длинная")
+    let keyboard = app.keyboards.firstMatch
+    XCTAssertTrue(keyboard.waitForExistence(timeout: 8))
+    search.typeText("\n")
+    let hidden = XCTNSPredicateExpectation(
+      predicate: NSPredicate(format: "exists == false"), object: keyboard)
+    XCTAssertEqual(XCTWaiter.wait(for: [hidden], timeout: 8), .completed)
+    XCTAssertEqual(search.value as? String, "Длинная")
+    XCTAssertTrue(app.buttons.matching(
+      NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@",
+                  "chat.row.", "Длинная история")).firstMatch.waitForExistence(timeout: 12))
+    XCTAssertFalse(app.buttons.matching(
+      NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@",
+                  "chat.row.", "Плотная медиалента")).firstMatch.exists)
+  }
+
+  func testAChatKeepsItsIdentityAcrossRenamePinArchiveSearchAndRemoval() throws {
+    let origin = ProcessInfo.processInfo.environment["KANDINSKY_TEST_ORIGIN"] ?? ""
+    guard URLComponents(string: origin)?.host == "127.0.0.1" else {
+      throw XCTSkip("Нужен отдельный местный сервер для временного чата")
+    }
+
+    continueAfterFailure = false
+    let app = XCUIApplication()
+    app.launch()
+    try openFixtureHistory(app)
+    app.buttons["chat.compose"].tap()
+    let welcome = app.buttons["chat.welcome"]
+    XCTAssertTrue(welcome.waitForExistence(timeout: 10))
+    selectModel("Image Lite", in: app)
+    let marker = "ArchiveQA" + UUID().uuidString.prefix(8)
+    let renamed = "Renamed" + marker
+    let input = app.textViews["composer.input"]
+    input.tap()
+    input.typeText(marker)
+    app.buttons["composer.send"].tap()
+    try stopQueuedResult(in: app)
+
+    let drawer = app.buttons["chat.back"]
+    drawer.tap()
+    let entry = app.buttons.matching(
+      NSPredicate(format: "identifier BEGINSWITH %@ AND label BEGINSWITH %@", "chat.row.", marker)
+    ).firstMatch
+    XCTAssertTrue(entry.waitForExistence(timeout: 12))
+    let id = try XCTUnwrap(entry.identifier.split(separator: ".").last)
+    let row = app.buttons["chat.row.\(id)"]
+    let actions = app.buttons["chats.actions.\(id)"]
+
+    func choose(_ label: String) {
+      XCTAssertTrue(actions.waitForExistence(timeout: 8))
+      actions.tap()
+      let item = app.descendants(matching: .any).matching(
+        NSPredicate(format: "label == %@", label)
+      ).firstMatch
+      XCTAssertTrue(item.waitForExistence(timeout: 8), label)
+      item.tap()
+    }
+
+    func waitLabel(_ element: XCUIElement, _ label: String) {
+      let condition = XCTNSPredicateExpectation(
+        predicate: NSPredicate(format: "label == %@", label), object: element)
+      XCTAssertEqual(XCTWaiter.wait(for: [condition], timeout: 12), .completed)
+    }
+
+    func waitUntilMissing(_ element: XCUIElement) {
+      let condition = XCTNSPredicateExpectation(
+        predicate: NSPredicate(format: "exists == false"), object: element)
+      XCTAssertEqual(XCTWaiter.wait(for: [condition], timeout: 12), .completed)
+    }
+
+    choose("Переименовать")
+    let name = app.textFields["chats.rename.input"]
+    XCTAssertTrue(name.waitForExistence(timeout: 8))
+    let oldName = try XCTUnwrap(name.value as? String)
+    name.coordinate(withNormalizedOffset: CGVector(dx: 0.96, dy: 0.5)).tap()
+    name.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: oldName.count))
+    name.typeText(renamed)
+    app.alerts["Переименовать чат"].buttons["Сохранить"].tap()
+    waitLabel(row, renamed)
+
+    choose("Закрепить")
+    let pinned = app.staticTexts["Закреплённые"]
+    XCTAssertTrue(pinned.waitForExistence(timeout: 12))
+    choose("Открепить")
+    waitUntilMissing(pinned)
+    choose("В архив")
+    waitUntilMissing(row)
+    let archive = app.buttons["chats.archive"]
+    archive.tap()
+    XCTAssertTrue(row.waitForExistence(timeout: 12))
+    XCTAssertEqual(row.label, renamed)
+    choose("Вернуть из архива")
+    waitUntilMissing(row)
+    archive.tap()
+    XCTAssertTrue(row.waitForExistence(timeout: 12))
+
+    let search = app.textFields["chats.search.field"]
+    search.tap()
+    search.typeText(renamed)
+    XCTAssertTrue(row.waitForExistence(timeout: 12))
+    let matches = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "chat.row."))
+    let filtered = XCTNSPredicateExpectation(
+      predicate: NSPredicate { _, _ in matches.count == 1 }, object: nil)
+    XCTAssertEqual(XCTWaiter.wait(for: [filtered], timeout: 12), .completed)
+    row.tap()
+    XCTAssertTrue(input.waitForExistence(timeout: 10))
+    drawer.tap()
+    if !row.waitForExistence(timeout: 2) {
+      let activeSearch = app.textFields["chats.search.field"]
+      activeSearch.tap()
+      activeSearch.typeText(renamed)
+    }
+    choose("Удалить")
+    let confirmation = app.alerts["Удалить чат?"]
+    XCTAssertTrue(confirmation.waitForExistence(timeout: 8))
+    confirmation.buttons["Удалить"].tap()
+    waitUntilMissing(row)
+    XCTAssertTrue(welcome.waitForExistence(timeout: 12))
+    XCTAssertTrue(input.exists && input.isEnabled)
   }
 
   // На симуляторе с недоступной камерой проверяет понятную подсказку и сохранение ввода. Ошибка
@@ -494,6 +761,7 @@ final class AccountEntryUITests: XCTestCase {
 
     app.buttons["chat.compose"].tap()
     XCTAssertTrue(app.buttons["chat.welcome"].waitForExistence(timeout: 10))
+    selectModel("Image Lite", in: app)
     let settings = app.buttons["composer.settings"]
     let details = app.buttons["Дополнительно"]
     let panel = app.scrollViews["studio.panel.content"]
@@ -507,15 +775,21 @@ final class AccountEntryUITests: XCTestCase {
     XCTAssertTrue(slider.waitForExistence(timeout: 6))
     captureAdvancedPanel(app, name: "Native Kandinsky — expanded image settings")
 
-    slider.coordinate(withNormalizedOffset: CGVector(dx: 0.56, dy: 0.5)).tap()
+    let sliderStart = slider.coordinate(withNormalizedOffset: CGVector(dx: 0.10, dy: 0.5))
+    let sliderGoal = slider.coordinate(withNormalizedOffset: CGVector(dx: 0.56, dy: 0.5))
+    sliderStart.tap()
+    XCTAssertFalse(app.staticTexts["Следование описанию 5.0"].exists)
+    sliderStart.press(forDuration: 0.10, thenDragTo: sliderGoal)
     XCTAssertTrue(app.staticTexts["Следование описанию 5.0"].exists)
-    negative.tap()
+    negative.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.95)).tap()
+    if let previous = negative.value as? String, !previous.isEmpty {
+      negative.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: previous.count))
+    }
     negative.typeText("No fog\nNo flare")
     XCTAssertEqual(negative.value as? String, "No fog\nNo flare")
     XCTAssertEqual(app.staticTexts["studio.settings.negative.count"].label, "15/2000")
     if !seed.isHittable { panel.swipeUp() }
-    seed.tap()
-    seed.typeText("41")
+    enterSeed("41", in: seed)
     if !done.isHittable { panel.swipeUp() }
     XCTAssertTrue(done.isHittable)
     done.tap()
@@ -535,12 +809,7 @@ final class AccountEntryUITests: XCTestCase {
     composer.tap()
     composer.typeText(marker)
     app.buttons["composer.send"].tap()
-    let cancel = app.buttons.matching(
-      NSPredicate(format: "identifier BEGINSWITH %@", "generation.action.cancel.")
-    ).firstMatch
-    XCTAssertTrue(cancel.waitForExistence(timeout: 24))
-    cancel.tap()
-    XCTAssertTrue(app.staticTexts["Генерация отменена"].waitForExistence(timeout: 12))
+    try stopQueuedResult(in: app)
   }
 
   // Делает снимок открытых настроек и сохраняет его в отчёте проверки. При сбое можно увидеть,
@@ -559,6 +828,7 @@ final class AccountEntryUITests: XCTestCase {
     let app = XCUIApplication()
     app.launch()
     try openFixtureHistory(app)
+    selectModel("Image Lite", in: app)
     let settings = app.buttons["composer.settings"]
     XCTAssertTrue(settings.waitForExistence(timeout: 20))
     settings.tap()
@@ -604,8 +874,7 @@ final class AccountEntryUITests: XCTestCase {
     captureAdvancedPanel(app, name: "Native Kandinsky — expanded video settings")
     XCTAssertFalse(app.textViews["studio.settings.negative"].exists)
     if !seed.isHittable { app.swipeUp() }
-    seed.tap()
-    seed.typeText("23")
+    enterSeed("23", in: seed)
     let done = app.buttons["Готово"]
     let content = app.scrollViews["studio.panel.content"]
     if !done.isHittable { content.swipeUp() }
@@ -621,18 +890,10 @@ final class AccountEntryUITests: XCTestCase {
 
   // Открывает подготовленную медиаленту и вызывает системную передачу и сохранение файла. Ждёт
   // нужные системные окна, чтобы отличить рабочую команду от нажатия без результата.
-  func testExistingMediaHistory() throws {
+  func testSharingTheOriginalOpensTheSystemMenu() throws {
     let app = XCUIApplication()
     app.launch()
-    let history = app.descendants(matching: .any).matching(
-      NSPredicate(
-        format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "chat.row.", "Плотная медиалента")
-    ).firstMatch
-    guard history.waitForExistence(timeout: 12) else {
-      throw XCTSkip("Для проверки войдите в существующий аккаунт с медиалентой")
-    }
-    history.tap()
-    XCTAssertTrue(app.textViews["composer.input"].waitForExistence(timeout: 20))
+    try openFixtureHistory(app)
     XCTAssertTrue(app.buttons["composer.model"].exists)
     let evidence = XCTAttachment(screenshot: app.screenshot())
     evidence.name = "Native Kandinsky — media history"
@@ -651,8 +912,12 @@ final class AccountEntryUITests: XCTestCase {
     sheet.name = "Native Kandinsky — share original"
     sheet.lifetime = .keepAlways
     add(sheet)
+  }
 
-    app.buttons["Close"].tap()
+  func testSavingTheOriginalOpensTheFolderPicker() throws {
+    let app = XCUIApplication()
+    app.launch()
+    try openFixtureHistory(app)
     let save = app.buttons.matching(
       NSPredicate(format: "identifier BEGINSWITH %@", "media.action.save.")
     ).firstMatch

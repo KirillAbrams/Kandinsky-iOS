@@ -12,19 +12,24 @@ import UniformTypeIdentifiers
 @MainActor final class MediaGalleryPresentationTests: XCTestCase {
   private final class Downloads: @unchecked Sendable {
     private let lock = NSLock()
-    private var originals = 0
+    private var originals: [String] = []
     private var cancelled = 0
     var counts: (Int, Int) {
       lock.lock()
       defer { lock.unlock() }
-      return (originals, cancelled)
+      return (originals.count, cancelled)
     }
     // Увеличиваем число чтений оригинала под блокировкой. Так сравниваем запросы выбранной
     // страницы с работой соседей.
-    func fetch() {
+    func fetch(_ path: String = "") {
       lock.lock()
-      originals += 1
+      originals.append(path)
       lock.unlock()
+    }
+    func reads(of path: String) -> Int {
+      lock.lock()
+      defer { lock.unlock() }
+      return originals.filter { $0 == path }.count
     }
     // Отмечаем отмену фактической передачи под блокировкой. По этому числу видно, сколько
     // загрузок завершились при уходе.
@@ -46,6 +51,320 @@ import UniformTypeIdentifiers
   private func descendants(_ view: UIView) -> [UIView] {
     view.subviews.flatMap { [$0] + descendants($0) }
   }
+
+  func testProgressControlStopsAnimatingWhenHiddenAndShowsTheRetryAction() throws {
+    let control = MediaProgressControl(frame: CGRect(x: 0, y: 0, width: 48, height: 48))
+    let layers = try XCTUnwrap(control.layer.sublayers?.compactMap { $0 as? CAShapeLayer })
+    XCTAssertEqual(layers.count, 2)
+    let ring = try XCTUnwrap(layers.first)
+    let symbol = try XCTUnwrap(layers.last)
+    XCTAssertTrue(control.isHidden)
+    control.foregroundColor = .systemBlue
+    XCTAssertEqual(try XCTUnwrap(ring.strokeColor), UIColor.systemBlue.cgColor)
+    XCTAssertEqual(try XCTUnwrap(symbol.strokeColor), UIColor.systemBlue.cgColor)
+    control.update(progress: nil, visible: true)
+    control.layoutIfNeeded()
+    let cancel = try XCTUnwrap(symbol.path).boundingBox
+    XCTAssertFalse(control.isHidden)
+    XCTAssertEqual(control.accessibilityIdentifier, "media.cancel")
+    XCTAssertEqual(control.accessibilityValue, "Загрузка")
+    XCTAssertNotNil(ring.animation(forKey: "loading"))
+
+    control.update(progress: 0.43, visible: true)
+    XCTAssertEqual(ring.strokeEnd, 0.43, accuracy: 0.001)
+    XCTAssertEqual(control.accessibilityValue, "43%")
+    XCTAssertNil(ring.animation(forKey: "loading"))
+    control.update(progress: nil, visible: true, retry: true)
+    control.layoutIfNeeded()
+    XCTAssertEqual(control.accessibilityIdentifier, "media.retry")
+    XCTAssertEqual(control.accessibilityLabel, "Повторить загрузку")
+    XCTAssertNotEqual(try XCTUnwrap(symbol.path).boundingBox, cancel)
+    XCTAssertNil(ring.animation(forKey: "loading"))
+
+    control.update(progress: nil, visible: false)
+    XCTAssertTrue(control.isHidden)
+    XCTAssertNil(ring.animation(forKey: "loading"))
+  }
+
+  func testPhotoWithoutAHistoryUsesOneStandaloneViewerAndReturnsToChat() async throws {
+    let h = try await RepositoryHarness.open()
+    let fixtures = try XCTUnwrap(
+      Bundle(for: RepositoryHarness.self).url(forResource: "fixtures", withExtension: nil))
+    let media = MediaStore(store: h.store)
+    let admission = MediaAdmission()
+    let playback = MediaCoordinator(admission: admission, media: media)
+    let draft = try await media.stage(
+      sourceURL: fixtures.appendingPathComponent("media/photo-000.jpg"), mime: "image/jpeg")
+    let delta = try await h.repo.send(SendCommand(
+      operationID: UUID().uuidString, chatID: 2, kind: .photo, caption: "Отдельное фото",
+      attachments: [draft]))
+    let row = try XCTUnwrap(delta.inserted.first)
+
+    let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+    let previous = scene.windows.first { $0.isKeyWindow }
+    let parent = UIViewController()
+    let window = UIWindow(windowScene: scene)
+    window.rootViewController = parent
+    window.makeKeyAndVisible()
+    let host = ChatScrollHost()
+    host.frame = parent.view.bounds
+    parent.view.addSubview(host)
+    host.configureMedia(media)
+    host.configurePlayback(playback, media: media)
+    host.setMediaVisible(true)
+    defer {
+      host.close()
+      playback.close()
+      admission.close()
+      media.close()
+      window.isHidden = true
+      previous?.makeKey()
+    }
+
+    XCTAssertNil(host.repository)
+    let frame = CGRect(x: 8, y: 20, width: 260, height: 160)
+    host.activateMedia(row, frame: frame)
+    let viewer = try XCTUnwrap(host.photoViewer)
+    XCTAssertNil(host.mediaGallery)
+    XCTAssertFalse(host.scene.mediaVisible)
+    host.activateMedia(row, frame: frame)
+    XCTAssertTrue(host.photoViewer === viewer)
+    try await waitFor("Отдельное окно показывает подготовленное фото") {
+      let preview = viewer.retainedPreview()
+      defer { preview?.close() }
+      return preview?.image != nil && parent.presentedViewController === viewer
+    }
+    let caption = try XCTUnwrap(descendants(viewer.view).compactMap { $0 as? UITextView }
+      .first { $0.accessibilityIdentifier == "viewer.caption" })
+    XCTAssertEqual(caption.text, "Отдельное фото")
+    let close = try XCTUnwrap(descendants(viewer.view).compactMap { $0 as? UIButton }
+      .first { $0.accessibilityIdentifier == "photo.close" })
+    close.sendActions(for: .touchUpInside)
+    try await waitFor("После закрытия просмотр освобождает ленту") {
+      host.photoViewer == nil && parent.presentedViewController == nil && host.scene.mediaVisible
+    }
+    try await h.close()
+  }
+
+  func testRemovingTheLastVisiblePhotoClosesTheGalleryExactlyOnce() async throws {
+    let h = try await RepositoryHarness.open()
+    let media = MediaStore(store: h.store)
+    let admission = MediaAdmission()
+    let playback = MediaCoordinator(admission: admission, media: media)
+    defer {
+      playback.close()
+      media.close()
+      admission.close()
+    }
+    let fixtures = try XCTUnwrap(
+      Bundle(for: RepositoryHarness.self).url(forResource: "fixtures", withExtension: nil))
+    let draft = try await media.stage(
+      sourceURL: fixtures.appendingPathComponent("media/photo-000.jpg"), mime: "image/jpeg")
+    let inserted = try await h.repo.send(SendCommand(
+      operationID: UUID().uuidString, chatID: 2, kind: .photo, caption: "Один снимок",
+      attachments: [draft]))
+    let message = try XCTUnwrap(inserted.inserted.first)
+    let gallery = MediaGalleryController(
+      seed: message, repository: h.repo, media: media, playback: playback,
+      surface: InlinePlayerSurface(coordinator: playback), preview: nil)
+    var returned = 0
+    gallery.onReturn = { returned += 1 }
+    gallery.loadViewIfNeeded()
+    gallery.view.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
+    gallery.viewDidLayoutSubviews()
+    let caption = try XCTUnwrap(
+      gallery.view.subviews.compactMap { $0 as? UITextView }
+        .first { $0.accessibilityIdentifier == "viewer.caption" })
+    XCTAssertEqual(caption.text, "Один снимок")
+    XCTAssertFalse(caption.isHidden)
+    let pager = try XCTUnwrap(
+      descendants(gallery.view).compactMap { $0 as? UIScrollView }.first {
+        $0.accessibilityIdentifier == "viewer.pages"
+      })
+    let center = pager.bounds.width
+    XCTAssertGreaterThan(center, 0)
+    for offset in [center / 2, center * 1.5] {
+      pager.contentOffset.x = offset
+      gallery.scrollViewDidScroll(pager)
+      gallery.scrollViewDidEndScrollingAnimation(pager)
+      XCTAssertEqual(pager.contentOffset.x, center, accuracy: 0.5)
+      XCTAssertEqual(caption.text, "Один снимок")
+    }
+    let actualDeletion = try await h.repo.delete(messageID: message.id)
+    gallery.apply(actualDeletion)
+    XCTAssertEqual(returned, 1)
+    gallery.apply(actualDeletion)
+    gallery.close(animated: false)
+    XCTAssertEqual(returned, 1)
+    XCTAssertNil(playback.currentMessageID)
+    XCTAssertTrue(descendants(gallery.view).allSatisfy {
+      $0.accessibilityIdentifier?.hasPrefix("viewer.page.") != true
+    })
+    let remaining = try await h.repo.history(PageRequest(chatID: 2)).rows
+    XCTAssertTrue(remaining.isEmpty)
+    try await h.close()
+  }
+
+  func testNeighbourPageWaitsForTheActiveAlbumSwipeToSettle() async throws {
+    let harness = try await RepositoryHarness.open()
+    let media = MediaStore(store: harness.store)
+    let admission = MediaAdmission()
+    let playback = MediaCoordinator(admission: admission, media: media)
+    defer {
+      playback.close()
+      media.close()
+      admission.close()
+    }
+    let fixtures = try XCTUnwrap(
+      Bundle(for: RepositoryHarness.self).url(forResource: "fixtures", withExtension: nil))
+    let source = fixtures.appendingPathComponent("media/photo-000.jpg")
+    let first = try await media.stage(sourceURL: source, mime: "image/jpeg")
+    let second = try await media.stage(sourceURL: source, mime: "image/jpeg")
+    let third = try await media.stage(sourceURL: source, mime: "image/jpeg")
+    let earlier = try await media.stage(sourceURL: source, mime: "image/jpeg")
+    let preceding = try await harness.repo.send(SendCommand(
+      operationID: UUID().uuidString, chatID: 2, kind: .photo,
+      caption: "Предыдущий снимок", attachments: [earlier]))
+    let album = try await harness.repo.send(SendCommand(
+      operationID: UUID().uuidString, chatID: 2, kind: .photo,
+      caption: "Два снимка", attachments: [first, second]))
+    let following = try await harness.repo.send(SendCommand(
+      operationID: UUID().uuidString, chatID: 2, kind: .photo,
+      caption: "Следующий снимок", attachments: [third]))
+    let initial = try XCTUnwrap(album.inserted.first)
+    let neighbour = try XCTUnwrap(following.inserted.first)
+    let previous = try XCTUnwrap(preceding.inserted.first)
+    for startAnotherSwipe in [false, true] {
+      let gallery = MediaGalleryController(
+        seed: initial, repository: harness.repo, media: media, playback: playback,
+        surface: InlinePlayerSurface(coordinator: playback), preview: nil)
+      gallery.loadViewIfNeeded()
+      defer { gallery.close(animated: false) }
+      gallery.view.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
+      gallery.viewDidLayoutSubviews()
+      let pager = try XCTUnwrap(gallery.view.subviews.compactMap { $0 as? UIScrollView }.first)
+      let center = pager.bounds.width
+      XCTAssertGreaterThan(center, 0)
+      let swipe = center * 1.75
+      pager.contentOffset.x = swipe
+      func hasPage(_ id: MessageID, index: Int) -> Bool {
+        gallery.children.contains { $0.view.accessibilityIdentifier == "viewer.page.\(id)/\(index)" }
+      }
+      let movedBeforeRelease = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+        abs(pager.contentOffset.x - swipe) > 0.5 || hasPage(previous.id, index: 0)
+      }, object: nil)
+      movedBeforeRelease.isInverted = true
+      await fulfillment(of: [movedBeforeRelease], timeout: 0.35)
+      XCTAssertEqual(pager.contentOffset.x, swipe, accuracy: 0.5)
+      XCTAssertTrue(hasPage(initial.id, index: 1))
+      XCTAssertFalse(hasPage(neighbour.id, index: 0))
+      if startAnotherSwipe {
+        gallery.scrollViewWillBeginDragging(pager)
+        XCTAssertEqual(pager.contentOffset.x, swipe - center, accuracy: 0.5)
+        XCTAssertTrue(hasPage(neighbour.id, index: 0))
+      }
+      gallery.scrollViewDidEndDragging(pager, willDecelerate: false)
+      try await waitFor("После свайпа следующий снимок доступен рядом") {
+        hasPage(neighbour.id, index: 0)
+      }
+      XCTAssertEqual(pager.contentOffset.x, center, accuracy: 0.5)
+      pager.contentOffset.x = 2 * center
+      gallery.scrollViewDidEndDecelerating(pager)
+      let caption = gallery.view.subviews.compactMap { $0 as? UITextView }
+        .first { $0.accessibilityIdentifier == "viewer.caption" }
+      XCTAssertEqual(caption?.text, "Следующий снимок")
+    }
+    try await harness.close()
+  }
+
+  func testGalleryRetriesItsNeighboursAfterAReadErrorWithoutChangingTheCurrentPhoto() async throws {
+    let h = try await RepositoryHarness.open()
+    let media = MediaStore(store: h.store)
+    let admission = MediaAdmission()
+    let playback = MediaCoordinator(admission: admission, media: media)
+    defer { playback.close(); admission.close(); media.close() }
+    let fixtures = try XCTUnwrap(
+      Bundle(for: RepositoryHarness.self).url(forResource: "fixtures", withExtension: nil))
+    let source = fixtures.appendingPathComponent("real-media/backend-824d66cce0d64409ad4888a13792c7d4.jpg")
+
+    func savePhoto(_ caption: String) async throws -> Message {
+      let draft = try await media.stage(sourceURL: source, mime: "image/jpeg")
+      let sent = try await h.repo.send(SendCommand(
+        operationID: UUID().uuidString, chatID: 2, kind: .photo,
+        caption: caption, attachments: [draft]))
+      return try XCTUnwrap(sent.inserted.first)
+    }
+
+    let original = try await savePhoto("Открытый снимок")
+    let following = try await savePhoto("Снимок справа")
+    try await h.store.perform { db in
+      try db.execute("UPDATE messages SET direction=? WHERE id=?", [
+        .text("invalid-direction"), .integer(following.id),
+      ])
+    }
+
+    let gallery = MediaGalleryController(
+      seed: original, repository: h.repo, media: media, playback: playback,
+      surface: InlinePlayerSurface(coordinator: playback), preview: nil)
+    defer { gallery.close(animated: false) }
+    gallery.loadViewIfNeeded()
+    gallery.view.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
+    gallery.viewDidLayoutSubviews()
+    let pager = try XCTUnwrap(gallery.view.subviews.compactMap { $0 as? UIScrollView }.first)
+    let caption = try XCTUnwrap(gallery.view.subviews.compactMap { $0 as? UITextView }.first {
+      $0.accessibilityIdentifier == "viewer.caption"
+    })
+    let unexpectedPage = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+      gallery.children.count != 1 || caption.text != original.caption
+    }, object: nil)
+    unexpectedPage.isInverted = true
+    await fulfillment(of: [unexpectedPage], timeout: 0.3)
+
+    try await h.store.perform { db in
+      try db.execute("UPDATE messages SET direction=? WHERE id=?", [
+        .text(following.direction.rawValue), .integer(following.id),
+      ])
+    }
+    gallery.scrollViewDidEndScrollingAnimation(pager)
+    try await waitFor("После повтора появился соседний снимок") {
+      gallery.children.contains { $0.view.accessibilityIdentifier == "viewer.page.\(following.id)/0" }
+    }
+    XCTAssertEqual(caption.text, original.caption)
+    pager.contentOffset.x = pager.bounds.width * 2
+    gallery.scrollViewDidEndDecelerating(pager)
+    XCTAssertEqual(caption.text, following.caption)
+    gallery.close(animated: false)
+    try await h.close()
+  }
+
+  func testOpeningAStaleGallerySelectionReturnsWithoutKeepingAnEmptyPage() async throws {
+    let h = try await RepositoryHarness.open()
+    let media = MediaStore(store: h.store)
+    let admission = MediaAdmission()
+    let playback = MediaCoordinator(admission: admission, media: media)
+    defer {
+      playback.close()
+      media.close()
+      admission.close()
+    }
+    let sent = try await h.repo.send(
+      SendCommand(operationID: UUID().uuidString, chatID: 2, text: "Медиа уже нет"))
+    let empty = try XCTUnwrap(sent.inserted.first)
+    let surface = InlinePlayerSurface(coordinator: playback)
+    let gallery = MediaGalleryController(
+      seed: empty, repository: h.repo, media: media, playback: playback, surface: surface,
+      preview: nil)
+    var returns = 0
+    gallery.onReturn = { returns += 1 }
+    gallery.loadViewIfNeeded()
+    gallery.close(animated: false)
+    XCTAssertEqual(returns, 1)
+    XCTAssertTrue(gallery.children.isEmpty)
+    XCTAssertNil(surface.superview)
+    XCTAssertNil(playback.currentMessageID)
+    try await h.close()
+  }
+
   // Убираем оригинал и заново создаём уже просмотренную страницу. Она должна найти чёткую копию
   // без сети. Очистка удаляет и эту подготовленную копию.
   func testARecreatedGalleryPageFindsItsSharpCopyAfterOriginalEviction() async throws {
@@ -454,6 +773,72 @@ import UniformTypeIdentifiers
     try await h.close()
   }
 
+  func testGeneratedVideoRestartsAfterEnteringBackgroundWithoutADuplicatePlayer() async throws {
+    let h = try await RepositoryHarness.open()
+    let media = MediaStore(store: h.store)
+    let admission = MediaAdmission()
+    let player = MediaCoordinator(admission: admission, media: media)
+    let surface = InlinePlayerSurface(coordinator: player)
+    let fixtures = try XCTUnwrap(
+      Bundle(for: RepositoryHarness.self).url(forResource: "fixtures", withExtension: nil))
+    let draft = try await media.stage(
+      sourceURL: fixtures.appendingPathComponent("media/video-01.mp4"), mime: "video/mp4")
+    let sent = try await h.repo.send(
+      SendCommand(
+        operationID: UUID().uuidString, chatID: 2, kind: .video, caption: "Результат",
+        attachments: [draft]))
+    let row = try XCTUnwrap(sent.inserted.first)
+    let scene = try XCTUnwrap(
+      UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+    let previous = scene.windows.first { $0.isKeyWindow }
+    let window = UIWindow(windowScene: scene)
+    let root = UIViewController()
+    window.rootViewController = root
+    window.makeKeyAndVisible()
+    let viewer = MediaGalleryController(
+      seed: row, repository: h.repo, media: media, playback: player, surface: surface, preview: nil)
+    viewer.onDeleteResult = { _, _ in XCTFail("Переход в фон не удаляет результат") }
+    defer {
+      viewer.close(animated: false, returnToChat: false)
+      player.close()
+      media.close()
+      admission.close()
+      window.isHidden = true
+      window.rootViewController = nil
+      previous?.makeKey()
+    }
+
+    root.present(viewer, animated: false)
+    try await waitFor("В открытом результате виден настоящий кадр") {
+      player.currentMessageID == row.id && surface.hasVideoFrame && player.isPlaying
+    }
+    let first = try XCTUnwrap(player.session.player.currentItem)
+    NotificationCenter.default.post(name: UIScene.didActivateNotification, object: scene)
+    XCTAssertTrue(player.session.player.currentItem === first)
+    NotificationCenter.default.post(
+      name: UIApplication.didEnterBackgroundNotification, object: UIApplication.shared)
+    try await waitFor("Уход в фон освобождает текущий ролик") {
+      player.currentMessageID == nil && player.session.player.currentItem == nil
+    }
+
+    NotificationCenter.default.post(name: UIScene.didActivateNotification, object: scene)
+    try await waitFor("Возврат показывает кадр того же результата") {
+      player.currentMessageID == row.id && surface.hasVideoFrame && player.isPlaying
+    }
+    let resumed = try XCTUnwrap(player.session.player.currentItem)
+    XCTAssertFalse(resumed === first)
+    NotificationCenter.default.post(name: UIScene.didActivateNotification, object: scene)
+    XCTAssertTrue(player.session.player.currentItem === resumed)
+
+    root.dismiss(animated: false)
+    try await waitFor("Закрытие окна извне освобождает проигрыватель") {
+      root.presentedViewController == nil && player.currentMessageID == nil
+    }
+    NotificationCenter.default.post(name: UIScene.didActivateNotification, object: scene)
+    XCTAssertNil(player.session.player.currentItem)
+    try await h.close()
+  }
+
   // Удерживаем подготовку рисунка автоматического видео. Скрытый элемент загрузки не должен быть
   // доступен для нажатия или озвучивания.
   func testAutoplayPosterDoesNotExposeAnInvisibleDownloadAction() async throws {
@@ -579,6 +964,78 @@ import UniformTypeIdentifiers
 
   // Листаем фото, видео и следующее фото, затем возвращаемся к видео. Проверяем выбранные
   // подписи, одну галерею, подготовленный проигрыватель и исходное место истории при закрытии.
+  func testGalleryReturnsTheSamePlayingVideoToItsChat() async throws {
+    let harness = try await RepositoryHarness.open()
+    let media = MediaStore(store: harness.store)
+    let admission = MediaAdmission()
+    let playback = MediaCoordinator(admission: admission, media: media)
+    let fixtures = try XCTUnwrap(
+      Bundle(for: RepositoryHarness.self).url(forResource: "fixtures", withExtension: nil))
+    let video = try await media.stage(
+      sourceURL: fixtures.appendingPathComponent("media/video-00.mp4"), mime: "video/mp4")
+    let inserted = try await harness.repo.send(SendCommand(
+      operationID: UUID().uuidString, chatID: 2, kind: .video,
+      caption: "Ролик из истории", attachments: [video]))
+    let row = try XCTUnwrap(inserted.inserted.first)
+    let attachment = try XCTUnwrap(row.attachments.first)
+
+    let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+    let previousWindow = scene.windows.first { $0.isKeyWindow }
+    let window = UIWindow(windowScene: scene)
+    let parent = UIViewController()
+    let host = ChatScrollHost()
+    window.rootViewController = parent
+    window.makeKeyAndVisible()
+    host.frame = parent.view.bounds
+    parent.view.addSubview(host)
+    host.configureMedia(media)
+    host.configurePlayback(playback, media: media)
+    let owner = try XCTUnwrap(playback.presentationOwner)
+    defer {
+      host.close()
+      parent.dismiss(animated: false)
+      playback.close()
+      admission.close()
+      media.close()
+      window.isHidden = true
+      previousWindow?.makeKey()
+    }
+
+    try await host.open(chatID: 2, repository: harness.repo, anchor: nil)
+    try await waitFor("В истории появилась строка с видео") { host.loaded[row.id] != nil }
+    playback.play(target: PlaybackTarget(attachment: attachment, messageID: row.id, kind: .video))
+    try await waitFor("В ленте виден настоящий кадр") {
+      playback.positionMs >= 300 && host.playerSurface?.hasVideoFrame == true
+    }
+    let surface = try XCTUnwrap(host.playerSurface)
+    let item = try XCTUnwrap(playback.session.player.currentItem)
+    let position = playback.positionMs
+
+    host.activateMedia(row, frame: .zero)
+    let gallery = try XCTUnwrap(host.mediaGallery)
+    try await waitFor("Галерея приняла уже открытый ролик") {
+      parent.presentedViewController === gallery && playback.presentationOwner != owner
+        && gallery.view.window != nil
+    }
+    XCTAssertTrue(playback.session.player.currentItem === item)
+    XCTAssertTrue(descendants(gallery.view).contains { $0 === surface })
+    XCTAssertGreaterThanOrEqual(playback.positionMs + 50, position)
+
+    let close = try XCTUnwrap(descendants(gallery.view).compactMap { $0 as? UIButton }
+      .first { $0.accessibilityIdentifier == "photo.close" })
+    close.sendActions(for: .touchUpInside)
+    try await waitFor("Лента снова владеет тем же проигрывателем") {
+      host.mediaGallery == nil && playback.presentationOwner == owner
+        && parent.presentedViewController == nil
+    }
+    XCTAssertTrue(playback.session.player.currentItem === item)
+    XCTAssertEqual(playback.currentMessageID, row.id)
+    let key = VideoPlaybackKey(messageID: row.id, attachment: attachment)
+    XCTAssertGreaterThanOrEqual(media.videoPlayback.position(key) * 1000 + 50, Double(position))
+    host.close()
+    try await harness.close()
+  }
+
   func testPhotoVideoPhotoUsesOnePagedPresentationAndOneNativePlayer() async throws {
     final class CacheMiss: MediaFileProvider {
       // Возвращаем отсутствие готового местного файла для управляемого источника. Галерея не
@@ -814,8 +1271,8 @@ import UniformTypeIdentifiers
         with: Data(contentsOf: fixtures.appendingPathComponent("manifest.json"))) as! [String: Any]
     let names = try XCTUnwrap(manifest["files"] as? [[String: Any]]).filter {
       $0["mime"] as? String == "image/jpeg"
-    }.prefix(3).compactMap { $0["fileName"] as? String }
-    XCTAssertEqual(names.count, 3)
+    }.prefix(4).compactMap { $0["fileName"] as? String }
+    XCTAssertEqual(names.count, 4)
     var urls: [String: URL] = [:], rows: [Message] = []
     for (index, name) in names.enumerated() {
       let draft = try await media.stage(
@@ -836,7 +1293,7 @@ import UniformTypeIdentifiers
     media.remoteFile = { attachment, preview, token in
       let url = try XCTUnwrap(sources[attachment.relativePath])
       if preview { return (url, "image/jpeg") }
-      downloads.fetch()
+      downloads.fetch(attachment.relativePath)
       let gate = DispatchSemaphore(value: 0)
       token.onCancel {
         downloads.cancel()
@@ -900,21 +1357,48 @@ import UniformTypeIdentifiers
     let after = try XCTUnwrap(central.retainedPreview())
     XCTAssertTrue(after.image === image, "Cancellation retains the pixels already displayed")
     after.close()
-    pager.contentOffset.x = pager.bounds.width * 2
-    pager.delegate?.scrollViewDidEndDecelerating?(pager)
+    func page(forward: Bool) {
+      pager.contentOffset.x = forward ? pager.bounds.width * 2 : 0
+      pager.delegate?.scrollViewDidEndDecelerating?(pager)
+    }
+    page(forward: true)
     try await waitFor("Only the newly selected original starts") { downloads.counts.0 == 2 }
-    pager.contentOffset.x = 0
-    pager.delegate?.scrollViewDidEndDecelerating?(pager)
-    XCTAssertEqual(downloads.counts.0, 2, "Returning to a cancelled page requires explicit retry")
-    XCTAssertTrue(
-      descendants(central.view).contains {
-        $0.accessibilityIdentifier == "media.retry" && !$0.isHidden
-      })
+    page(forward: true)
+    try await waitFor("A second swipe removes the cancelled page from the window") {
+      downloads.counts.0 == 3 && !viewer.children.contains { $0 === central }
+    }
+    page(forward: false)
+    try await waitFor("Returning past the adjacent page may resume its own original") {
+      downloads.counts.0 == 4
+    }
+    page(forward: false)
+    XCTAssertEqual(downloads.counts.0, 4, "Returning to a cancelled page requires explicit retry")
+    let rebuilt = try XCTUnwrap(viewer.children.compactMap { $0 as? PhotoViewerController }
+      .first { $0.view.accessibilityIdentifier == central.view.accessibilityIdentifier })
+    XCTAssertFalse(rebuilt === central)
+    let retry = try XCTUnwrap(descendants(rebuilt.view).compactMap { $0 as? UIControl }.first {
+      $0.accessibilityIdentifier == "media.retry" && !$0.isHidden
+    })
+    try await waitFor("Leaving the previous page cancels its request") { downloads.counts.1 == 4 }
+    let cancelledPhoto = "remote/gallery-1.jpg"
+    let attempted = downloads.reads(of: cancelledPhoto)
+    retry.sendActions(for: .touchUpInside)
+    try await waitFor("The explicit retry starts the original again") {
+      downloads.reads(of: cancelledPhoto) > attempted
+    }
+    for (forward, target) in [(true, 2), (true, 3), (false, 2), (false, 1)] {
+      let path = "remote/gallery-\(target).jpg"
+      let earlier = downloads.reads(of: path)
+      page(forward: forward)
+      try await waitFor("The chosen original starts on page \(target)") {
+        downloads.reads(of: path) > earlier
+      }
+    }
     XCTAssertEqual(viewer.children.count, 3)
     XCTAssertEqual(player.activePlayerCount, 0)
     viewer.close(animated: false, returnToChat: false)
     try await waitFor("Closing retires every actual image lease") { media.bytesUsed == 0 }
-    XCTAssertEqual(downloads.counts.1, 2)
+    XCTAssertEqual(downloads.counts.1, downloads.counts.0)
     try await h.close()
   }
 }

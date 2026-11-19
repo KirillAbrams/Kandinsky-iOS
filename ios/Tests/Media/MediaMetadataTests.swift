@@ -69,6 +69,14 @@ import ImageIO
       id: draft.id, relativePath: draft.relativePath, mime: draft.mime, byteSize: draft.byteSize,
       rawWidth: draft.rawWidth, rawHeight: draft.rawHeight, orientation: 1,
       durationMs: draft.durationMs, thumbnailKey: draft.id)
+    // У обрезанного JPEG осталась сигнатура. Проверка формата пропустит её, но декодер должен
+    // отказать и вернуть зарезервированную память до следующего запроса.
+    attachment.tinyPreview = Data([0xFF, 0xD8, 0xFF, 0xD9]).base64EncodedString()
+    let refused: Result<PreparedImage, Error> = await withCheckedContinuation { continuation in
+      _ = media.tinyPreview(attachment) { continuation.resume(returning: $0) }
+    }
+    XCTAssertThrowsError(try refused.get()) { XCTAssertEqual($0 as? MediaError, .corrupt) }
+    XCTAssertEqual(media.bytesUsed, 0)
     attachment.tinyPreview = text
     let frame: PreparedImage = try await withCheckedThrowingContinuation { continuation in
       _ = media.tinyPreview(attachment) { continuation.resume(with: $0) }

@@ -907,6 +907,29 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
     XCTAssertEqual(fm.enumerations, 4)
     XCTAssertTrue(FileManager.default.fileExists(atPath: newest.path))
   }
+  func testUnknownWriteSizeMakesTheBudgetMeasureItsFilesAgain() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let fileManager = CacheScanFileManager()
+    let budget = NetworkDiskBudget(root: root, fileManager: fileManager)
+    try FileManager.default.createDirectory(
+      at: root.appendingPathComponent("media/previews"), withIntermediateDirectories: true)
+    let keep = try sparse(root, "remote/new.mp4", 1024, 200)
+    let remove: (URL) throws -> Bool = {
+      try FileManager.default.removeItem(at: $0)
+      return true
+    }
+    try budget.accept(keep: keep, remove: remove)
+    XCTAssertEqual(fileManager.enumerations, 2)
+
+    let unmeasured = try sparse(root, "remote/unmeasured.mp4", 64 * 1024 * 1024)
+    budget.recordWrite(bytes: -1)
+    try budget.accept(keep: keep, remove: remove)
+    XCTAssertEqual(fileManager.enumerations, 4)
+    XCTAssertFalse(FileManager.default.fileExists(atPath: unmeasured.path))
+    XCTAssertEqual(try cachedBytes(root), 1024)
+  }
+
   /// Отказ поиска не меняет файлы и не должен сбрасывать уже выполненную сверку объёма.
   // Вызывает ошибку поиска, которая ничего не записывает, и затем снова читает готовый файл.
   // Прежний проверенный объём остаётся пригодным, поэтому повторного обхода нет.
@@ -1190,6 +1213,45 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
     } catch { XCTAssertEqual(error as? MediaError, .cancelled) }
     try await h.close()
   }
+  func testVideoPlaybackMigratesAnOldOriginalWithoutDownloadingItAgain() async throws {
+    let h = try await RepositoryHarness.open()
+    let fixtures = try XCTUnwrap(
+      Bundle(for: RepositoryHarness.self).url(forResource: "fixtures", withExtension: nil))
+    let bytes = try Data(contentsOf: fixtures.appendingPathComponent("media/video-01.mp4"))
+    let api = ScriptedHTTP.makeAPI([])
+    let remote = NetworkMedia(store: h.store, api: api)
+    defer { api.close() }
+    let blob = String(repeating: "a", count: 32)
+    let relative = "remote/" + blob
+    let legacy = try MediaStore.fileURL(root: h.root, relative: relative)
+    try FileManager.default.createDirectory(
+      at: legacy.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try bytes.write(to: legacy)
+    let previous = Attachment(
+      id: "old-video", relativePath: relative, mime: "video/mp4", byteSize: Int64(bytes.count),
+      rawWidth: 256, rawHeight: 256, orientation: 1, durationMs: 2000, thumbnailKey: blob)
+    let source = try await Task.detached {
+      try remote.playback(previous, token: MediaCancellation())
+    }.value
+    let typed = legacy.appendingPathExtension("mp4")
+    XCTAssertEqual(source.localFile?.path, typed.path)
+    XCTAssertEqual(try Data(contentsOf: typed), bytes)
+    XCTAssertFalse(FileManager.default.fileExists(atPath: legacy.path))
+    source.close()
+
+    let missing = Attachment(
+      id: "missing", relativePath: "objects/missing.mp4", mime: "video/mp4", byteSize: 1,
+      rawWidth: 0, rawHeight: 0, orientation: 1, durationMs: nil, thumbnailKey: "")
+    do {
+      _ = try await Task.detached {
+        try remote.playback(missing, token: MediaCancellation())
+      }.value
+      XCTFail("Отсутствующий местный файл не должен начинать загрузку")
+    } catch MediaError.io {}
+    XCTAssertTrue(ScriptedHTTP.requests().isEmpty)
+    try await h.close()
+  }
+
   // Читает местный оригинал и сравнивает байты и время использования. Сеть не вызывается, новая
   // отметка защищает недавно прочитанное от ранней уборки.
   func testDiskHitWorksWithoutNetworkAndRefreshesLastUse() async throws {
@@ -1210,8 +1272,8 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
       file.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)
     XCTAssertGreaterThan(used, old, "A disk cache hit must refresh eviction recency")
   }
-  // Открывает одно вложение двумя запросами и ждёт общую загрузку. После освобождения памяти файл
-  // остаётся, новый запрос читает его без повторной передачи.
+  // Большое фото без миниатюры ждёт открытия. Два запроса оригинала делят одну загрузку, а после
+  // освобождения памяти тот же файл читается с диска.
   func testConcurrentRemoteOpensDownloadOnceAndKeepFileAfterRamClear() async throws {
     let profile = try StudioTestServer.profile()
     let lookup = NetworkAPI(profile: profile)
@@ -1219,8 +1281,10 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
     let data = try await StudioTestServer.recentMedia(lookup).1
     let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
     let rows = try XCTUnwrap(json["messages"] as? [[String: Any]])
-    let photo = try XCTUnwrap(rows.first { $0["kind"] as? String == "photo" })
-    let wire = try XCTUnwrap((photo["attachments"] as? [[String: Any]])?.first)
+    let photos = rows.filter { $0["kind"] as? String == "photo" }
+    let wire = try XCTUnwrap(photos.compactMap {
+      ($0["attachments"] as? [[String: Any]])?.first
+    }.first { (($0["byteSize"] as? NSNumber)?.intValue ?? 0) > 256 * 1024 })
     let blob = try XCTUnwrap(wire["blobId"] as? String),
       mime = try XCTUnwrap(wire["mime"] as? String),
       size = try XCTUnwrap(wire["byteSize"] as? NSNumber).int64Value
@@ -1239,6 +1303,15 @@ private final class CacheScanFileManager: FileManager, @unchecked Sendable {
     let api = NetworkAPI(profile: profile, onRequestFinished: { counter.completed() }),
       remote = NetworkMedia(store: h.store, api: api)
     defer { api.close() }
+    do {
+      _ = try await Task.detached {
+        try remote.resolve(a, preview: true, token: MediaCancellation())
+      }.value
+      XCTFail("A large original without a preview must wait for an explicit opening")
+    } catch {
+      XCTAssertEqual(error as? MediaError, .unavailable)
+    }
+    XCTAssertEqual(counter.value, 0)
     let first = Task.detached { try remote.resolve(a, preview: false, token: MediaCancellation()) }
     let second = Task.detached { try remote.resolve(a, preview: false, token: MediaCancellation()) }
     let one = try await first.value, two = try await second.value

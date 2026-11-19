@@ -267,9 +267,23 @@ import UIKit
     }
     let record = restored ?? StudioDraftRecord(identity: UUID(), draft: Draft())
     let identity = record.identity
+    var draftPrepared = false
+    let prepareDraft: (Draft) async throws -> Void = { [weak self] draft in
+      guard let self, self.generation == ticket else { throw CancellationError() }
+      let previous = try await network.beginStudioDraft(
+        StudioDraftRecord(identity: identity, draft: draft))
+      draftPrepared = true
+      if let previous, previous.identity != identity {
+        try? await self.media?.discardUnpublishedImports(previous.draft.attachmentDrafts)
+      }
+    }
     model.persistStudioDraft = { chat, draft in
       if chat == nil {
-        try await network.saveStudioDraft(draft, identity: identity)
+        if draftPrepared {
+          try await network.saveStudioDraft(draft, identity: identity)
+        } else {
+          try await prepareDraft(draft)
+        }
       } else {
         try await network.finishStudioDraft(identity: identity)
       }
@@ -328,12 +342,11 @@ import UIKit
       await old?.close()
       guard generation == ticket else { return }
       do {
-        let previous = try await network.beginStudioDraft(record)
-        if let previous, previous.identity != record.identity {
-          try? await media?.discardUnpublishedImports(previous.draft.attachmentDrafts)
-        }
+        try await prepareDraft(record.draft)
       } catch {
         guard generation == ticket else { return }
+        surface.openStudioDraft(record.draft)
+        revealNavigation(controller, ticket: ticket)
         surface.showError(error)
         return
       }

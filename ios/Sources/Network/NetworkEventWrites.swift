@@ -108,7 +108,8 @@ extension NetworkStore {
           let known = try !db.rows(
             "SELECT 1 FROM net_messages WHERE serverID=?", [.integer(try message.int("id"))]
           ).isEmpty
-          if let id = try merge(db, wire: message) { touched[chat, default: []].insert(id) }
+          guard let id = try merge(db, wire: message) else { continue }
+          touched[chat, default: []].insert(id)
           if !known, try message.int("senderId") != userID,
             try message.int("seq")
               > (Int64(

@@ -34,6 +34,425 @@ private final class NativeDecodeProbe {
   }
 }
 @MainActor final class MediaStoreTests: XCTestCase {
+  func testPhotoDraftSurvivesAnOfflineAttemptAndUploadsOnceWhenReconnected() async throws {
+    guard NetworkProfile.origin.host == "127.0.0.1" else {
+      throw XCTSkip("Нужен местный сервер для передачи проверочного фото")
+    }
+    let profile = try StudioTestServer.profile()
+    let harness = try await RepositoryHarness.open()
+    let sync = NetworkSync(profile: profile, store: harness.store, local: harness.repo)
+    let media = MediaStore(store: harness.store)
+    let admission = MediaAdmission()
+    try await harness.store.perform { db in try NetworkSchema.install(db) }
+    let chat = try await sync.createStudioThread(id: UUID())
+    let scene = try XCTUnwrap(
+      UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+    let previousWindow = scene.windows.first { $0.isKeyWindow }
+    let window = UIWindow(windowScene: scene)
+    let parent = UIViewController()
+    window.rootViewController = parent
+    window.makeKeyAndVisible()
+    defer {
+      window.isHidden = true
+      previousWindow?.makeKeyAndVisible()
+      media.close()
+      admission.close()
+      sync.close()
+    }
+    let state = ConversationState(repository: harness.repo)
+    try await state.open(chatID: chat)
+    let original = try await media.stageStudioPhoto(sourceURL: source())
+    let staged = try media.fileURL(original.relativePath)
+    let initialBytes = try Data(contentsOf: staged)
+    var draft = state.draft
+    draft.text = "Проверка повтора загрузки"
+    draft.attachmentDrafts = [original]
+    state.editDraft(draft)
+    let offline = expectation(description: "Фото осталось в черновике при обрыве")
+    var prepareCount = 0
+    var errors: [String] = []
+    var progress: [Double?] = []
+    let coordinator = ChatAttachmentCoordinator(
+      view: parent.view, state: state, media: media, admission: admission,
+      presenter: { parent }, options: { .init(model: "video") },
+      selectOptions: state.updateGenerationOptions,
+      showError: { message in
+        errors.append(message)
+        if errors.count == 1 { offline.fulfill() }
+      },
+      previewVideo: { _, _, _ in XCTFail("Фото не открывает просмотр видео") },
+      prepareDraft: {
+        prepareCount += 1
+        if prepareCount == 1 { throw URLError(.notConnectedToInternet) }
+      },
+      showProgress: { progress.append($0) })
+    coordinator.network = sync
+    do {
+      coordinator.resumePendingUpload()
+      await fulfillment(of: [offline], timeout: 5)
+      let savedBeforeReconnect = try await harness.repo.draft(chatID: chat)
+      XCTAssertEqual(savedBeforeReconnect.attachmentDrafts.map(\.id), [original.id])
+      XCTAssertEqual(savedBeforeReconnect.text, draft.text)
+      let uploadedWhileOffline = try await sync.hasStudioUpload(original.id)
+      XCTAssertFalse(uploadedWhileOffline)
+      XCTAssertEqual(try Data(contentsOf: staged), initialBytes)
+
+      coordinator.resumePendingUpload()
+      XCTAssertFalse(coordinator.isImporting)
+      let acknowledged = expectation(description: "Местное хранилище приняло номер файла")
+      state.onChange = {
+        if !coordinator.isImporting { acknowledged.fulfill() }
+      }
+      coordinator.resumePendingUpload(reconnected: true)
+      await fulfillment(of: [acknowledged], timeout: 20)
+      state.onChange = nil
+      let uploaded = try await sync.hasStudioUpload(original.id)
+      XCTAssertTrue(uploaded)
+      XCTAssertEqual(prepareCount, 2)
+      XCTAssertEqual(errors, ["Фото осталось на устройстве. Проверьте соединение."])
+      XCTAssertEqual(progress.compactMap { $0 }.first, 0)
+      XCTAssertTrue(progress.last.map { $0 == nil } ?? false)
+      let persisted = try await harness.repo.draft(chatID: chat)
+      XCTAssertEqual(persisted.attachmentDrafts.map(\.id), [original.id])
+      XCTAssertEqual(persisted.text, draft.text)
+      coordinator.resumePendingUpload(reconnected: true)
+      let verified = expectation(description: "Подтверждённый файл проверен без повторной отправки")
+      state.onChange = { if !coordinator.isImporting { verified.fulfill() } }
+      await fulfillment(of: [verified], timeout: 5)
+      XCTAssertEqual(prepareCount, 2)
+      state.onChange = nil
+    } catch {
+      state.onChange = nil
+      coordinator.close(discardDraft: true)
+      await state.close()
+      try? await sync.deleteStudioThread(chat)
+      try? await harness.close()
+      throw error
+    }
+    coordinator.close(discardDraft: true)
+    await state.close()
+    try await sync.deleteStudioThread(chat)
+    try await harness.close()
+  }
+
+  func testPreviewLimitKeepsTheNewFrameAndAnUnrelatedServerPreview() async throws {
+    let h = try await RepositoryHarness.open()
+    let photos = h.root.appendingPathComponent("media/previews", isDirectory: true)
+    let manager = FileManager.default
+    try manager.createDirectory(at: photos, withIntermediateDirectories: true)
+    let original = source()
+    let bytes = try Data(contentsOf: original)
+    let cached = (0..<128).map { photos.appendingPathComponent("local-old-\($0).jpg") }
+    for (index, url) in cached.enumerated() {
+      try bytes.write(to: url)
+      let date = Date(timeIntervalSince1970: TimeInterval(1000 + index))
+      try manager.setAttributes([.modificationDate: date], ofItemAtPath: url.path)
+    }
+    let serverCopy = photos.appendingPathComponent("server-preview.jpg")
+    try bytes.write(to: serverCopy)
+    let root = h.root.standardizedFileURL
+    let preview = try MediaPreviewGenerator.normalFile(
+      root: root, relative: "remote/new-photo.jpg", file: original, mime: "image/jpeg")
+    XCTAssertFalse(manager.fileExists(atPath: cached[0].path))
+    XCTAssertTrue(manager.fileExists(atPath: cached[1].path))
+    XCTAssertEqual(try Data(contentsOf: serverCopy), bytes)
+    XCTAssertEqual(try manager.contentsOfDirectory(atPath: photos.path).filter {
+      $0.hasPrefix("local-")
+    }.count, 128)
+    let previewSource = try XCTUnwrap(CGImageSourceCreateWithURL(preview as CFURL, nil))
+    let image = try XCTUnwrap(CGImageSourceCreateImageAtIndex(previewSource, 0, nil))
+    XCTAssertLessThanOrEqual(max(image.width, image.height), 320)
+    XCTAssertEqual(
+      try MediaPreviewGenerator.normalFile(
+        root: root, relative: "remote/new-photo.jpg", file: original, mime: "image/jpeg"), preview)
+
+    let invalid = h.root.appendingPathComponent("invalid.jpg")
+    try Data("Повреждённое фото".utf8).write(to: invalid)
+    XCTAssertThrowsError(try MediaPreviewGenerator.tiny(normal: invalid)) {
+      XCTAssertEqual($0 as? MediaError, .corrupt)
+    }
+    let otherRoot = root.appendingPathComponent("separate")
+    let otherMedia = otherRoot.appendingPathComponent("media", isDirectory: true)
+    try manager.createDirectory(at: otherMedia, withIntermediateDirectories: true)
+    try manager.createSymbolicLink(
+      at: otherMedia.appendingPathComponent("previews"), withDestinationURL: photos)
+    XCTAssertThrowsError(try MediaPreviewGenerator.normalFile(
+      root: otherRoot, relative: "should-not-be-written.jpg", file: original, mime: "image/jpeg")
+    ) { XCTAssertEqual($0 as? MediaError, .corrupt) }
+    XCTAssertEqual(try Data(contentsOf: serverCopy), bytes)
+    try await h.close()
+  }
+
+  func testGalleryImportPreparesThePhotoAndRemovesTheTemporaryFile() async throws {
+    let h = try await RepositoryHarness.open()
+    let media = MediaStore(store: h.store)
+    defer { media.close() }
+    let provider = galleryProvider(file: source(), type: .jpeg)
+
+    let draft = try await StudioAttachmentImport.stage(provider, media: media)
+
+    XCTAssertEqual(draft.mime, "image/jpeg")
+    XCTAssertTrue(draft.relativePath.hasPrefix("selections/"))
+    XCTAssertGreaterThan(draft.rawWidth, 0)
+    XCTAssertGreaterThan(draft.rawHeight, 0)
+    let selection = try media.fileURL(draft.relativePath)
+    let size = try selection.resourceValues(forKeys: [.fileSizeKey]).fileSize
+    XCTAssertEqual(size, Int(draft.byteSize))
+    XCTAssertTrue(try galleryScratchFiles(h.root).isEmpty)
+    try await h.close()
+  }
+
+  func testPauseKeepsThePhotoAndARefusedUploadRemovesIt() async throws {
+    guard NetworkProfile.origin.host == "127.0.0.1",
+      ProcessInfo.processInfo.environment["KANDINSKY_TEST_SOURCE_GATE"] == "1"
+    else { throw XCTSkip("Нужен местный сервер с управляемой передачей фотографии") }
+
+    let profile = try StudioTestServer.profile()
+    let h = try await RepositoryHarness.open()
+    let sync = NetworkSync(profile: profile, store: h.store, local: h.repo)
+    let media = MediaStore(store: h.store)
+    let admission = MediaAdmission()
+    try await h.store.perform { db in try NetworkSchema.install(db) }
+    let chat = try await sync.createStudioThread(id: UUID())
+    let scene = try XCTUnwrap(
+      UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+    let previousWindow = scene.windows.first { $0.isKeyWindow }
+    let window = UIWindow(windowScene: scene)
+    let controller = UIViewController()
+    window.rootViewController = controller
+    window.makeKeyAndVisible()
+    let state = ConversationState(repository: h.repo)
+    var errors: [String] = []
+    var progress: [Double?] = []
+    let coordinator = ChatAttachmentCoordinator(
+      view: controller.view, state: state, media: media, admission: admission,
+      presenter: { controller }, options: { .init(model: "video") },
+      selectOptions: state.updateGenerationOptions, showError: { errors.append($0) },
+      previewVideo: { _, _, _ in XCTFail("Фото не открывает просмотр видео") },
+      showProgress: { progress.append($0) })
+    coordinator.network = sync
+    defer {
+      window.isHidden = true
+      previousWindow?.makeKeyAndVisible()
+      media.close()
+      admission.close()
+      sync.close()
+    }
+
+    func waitForSource(_ expected: String, at path: String) async throws -> Bool {
+      for _ in 0..<80 {
+        let reply = try await sync.api.json(path)
+        if try WireObject(data: reply).string("state") == expected { return true }
+        try await Task.sleep(for: .milliseconds(50))
+      }
+      return false
+    }
+
+    func cleanup() async {
+      state.onChange = nil
+      coordinator.close(discardDraft: true)
+      await state.close()
+      try? await sync.deleteStudioThread(chat)
+      try? await h.close()
+    }
+
+    do {
+      try await state.open(chatID: chat)
+      let photo = try await media.stageStudioPhoto(sourceURL: source())
+      let file = try media.fileURL(photo.relativePath)
+      let bytes = try Data(contentsOf: file)
+      var draft = state.draft
+      draft.text = "Сохраняем текст при остановке исходника"
+      draft.attachmentDrafts = [photo]
+      state.editDraft(draft)
+      let path = "/v1/__coverage/source/" + photo.id.lowercased()
+      _ = try await sync.api.json(path + "/pause", method: "PUT")
+      let paused = expectation(description: "Клиент закончил прерванную передачу")
+      state.onChange = { if !coordinator.isImporting { paused.fulfill() } }
+      coordinator.resumePendingUpload()
+      let serverHasRequest = try await waitForSource("receiving", at: path)
+      XCTAssertTrue(serverHasRequest)
+      XCTAssertTrue(progress.contains(0))
+      coordinator.pausePendingUpload()
+      await fulfillment(of: [paused], timeout: 8)
+      state.onChange = nil
+      let connectionClosed = try await waitForSource("cancelled", at: path)
+      XCTAssertTrue(connectionClosed)
+      let retained = try await h.repo.draft(chatID: chat)
+      XCTAssertEqual(retained.attachmentDrafts.map(\.id), [photo.id])
+      XCTAssertEqual(retained.text, draft.text)
+      XCTAssertEqual(try Data(contentsOf: file), bytes)
+      XCTAssertTrue(errors.isEmpty)
+      XCTAssertEqual(progress.last, .some(nil))
+
+      _ = try await sync.api.json(path + "/reject", method: "PUT")
+      let refused = expectation(description: "Клиент закончил обработку отказа сервера")
+      state.onChange = { if !coordinator.isImporting { refused.fulfill() } }
+      coordinator.resumePendingUpload(reconnected: true)
+      await fulfillment(of: [refused], timeout: 8)
+      state.onChange = nil
+      let serverRefused = try await waitForSource("rejected", at: path)
+      XCTAssertTrue(serverRefused)
+      let afterRefusal = try await h.repo.draft(chatID: chat)
+      XCTAssertTrue(afterRefusal.attachmentDrafts.isEmpty)
+      XCTAssertEqual(afterRefusal.text, draft.text)
+      XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
+      XCTAssertEqual(errors, ["Не удалось загрузить фото"])
+    } catch {
+      await cleanup()
+      throw error
+    }
+    await cleanup()
+  }
+
+  func testOriginalCleanupRejectsAChangedPathAndLeavesBothFiles() async throws {
+    let h = try await RepositoryHarness.open()
+    let media = MediaStore(store: h.store)
+    defer { media.close() }
+    let keep = try await media.stage(sourceURL: source(), mime: "image/jpeg")
+    let other = try await media.stage(sourceURL: source(), mime: "image/jpeg")
+    let originalPath = try media.fileURL(keep.relativePath)
+    let selectionPath = try media.fileURL(other.relativePath)
+    let bytes = try Data(contentsOf: originalPath)
+    let outside = h.root.appendingPathComponent("kept-original.jpg")
+    try FileManager.default.moveItem(at: originalPath, to: outside)
+    try FileManager.default.createSymbolicLink(at: originalPath, withDestinationURL: outside)
+    do {
+      try await media.discardUnpublishedImports([other, keep])
+      XCTFail("Удаление должно отклонить изменившийся путь")
+    } catch MediaError.corrupt {}
+    XCTAssertEqual(try Data(contentsOf: outside), bytes)
+    XCTAssertEqual(try Data(contentsOf: originalPath), bytes)
+    XCTAssertTrue(FileManager.default.fileExists(atPath: selectionPath.path))
+    try FileManager.default.removeItem(at: originalPath)
+    try await media.discardUnpublishedImport(other)
+    XCTAssertFalse(FileManager.default.fileExists(atPath: selectionPath.path))
+    XCTAssertEqual(try Data(contentsOf: outside), bytes)
+    try await h.close()
+  }
+
+  func testDatabaseAndSystemFileFailuresKeepTheirOwnMediaErrors() {
+    let cases: [(Error, MediaError)] = [
+      (RepoError.storageFull, .storageFull), (RepoError.cancelled, .cancelled),
+      (RepoError.corrupt, .corrupt), (RepoError.invalidInput, .io),
+      (NSError(domain: NSCocoaErrorDomain, code: NSFileWriteNoPermissionError), .permissionDenied),
+      (NSError(domain: NSPOSIXErrorDomain, code: Int(ENOSPC)), .storageFull),
+    ]
+    for (error, expected) in cases {
+      XCTAssertEqual(MediaStore.map(error) as? MediaError, expected)
+    }
+  }
+
+  func testRecoveryProtectsOriginalsFromTheNewChatAndItsUnconfirmedRequests() async throws {
+    let h = try await RepositoryHarness.open()
+    let media = MediaStore(store: h.store)
+    media.pendingReferences = NetworkMedia.pendingReferences
+    defer { media.close() }
+    var staged: [AttachmentDraft] = []
+    for _ in 0..<5 {
+      staged.append(try await media.stageSelection(sourceURL: source(), mime: "image/jpeg"))
+    }
+    let files = staged
+    let single = SendCommand(
+      operationID: UUID().uuidString, chatID: 2, kind: .photo, attachments: [files[1]])
+    let batch = SendCommand(
+      operationID: UUID().uuidString, chatID: 2, kind: .photo, attachments: [files[2]])
+    let queued = SendCommand(
+      operationID: UUID().uuidString, chatID: 2, kind: .photo, attachments: [files[3]])
+    let record = StudioDraftRecord(
+      identity: UUID(),
+      draft: Draft(attachmentDrafts: [files[0]], pendingSend: single, pendingMediaBatch: [batch]))
+    let payload = try JSONEncoder().encode(queued)
+    let expected = Set(files.prefix(4).map(\.relativePath))
+    try await h.store.perform { db in
+      try NetworkSchema.install(db)
+      try StudioDraftStorage.write(db, record)
+      try db.execute(
+        "INSERT INTO net_outbox(id,action,payload,payloadBytes) VALUES(?,'send',?,?)",
+        [.text(queued.operationID), .text(String(decoding: payload, as: UTF8.self)),
+         .integer(Int64(payload.count))])
+      XCTAssertEqual(try NetworkMedia.pendingReferences(db), expected)
+    }
+    try await media.recover()
+    for file in files.prefix(4) {
+      XCTAssertTrue(FileManager.default.fileExists(atPath: try media.fileURL(file.relativePath).path))
+    }
+    XCTAssertFalse(FileManager.default.fileExists(atPath: try media.fileURL(files[4].relativePath).path))
+    try await h.close()
+  }
+
+  func testGalleryImportKeepsVideoBytesAndRemovesTheTemporaryFile() async throws {
+    let h = try await RepositoryHarness.open()
+    let media = MediaStore(store: h.store)
+    defer { media.close() }
+    let fixtures = try XCTUnwrap(
+      Bundle(for: RepositoryHarness.self).url(forResource: "fixtures", withExtension: nil))
+    let video = fixtures.appendingPathComponent("media/video-00.mp4")
+    let provider = galleryProvider(file: video, type: .mpeg4Movie)
+
+    let draft = try await StudioAttachmentImport.stage(provider, media: media)
+
+    XCTAssertEqual(draft.mime, "video/mp4")
+    XCTAssertTrue(draft.relativePath.hasPrefix("selections/"))
+    XCTAssertGreaterThan(try XCTUnwrap(draft.durationMs), 0)
+    XCTAssertEqual(try Data(contentsOf: media.fileURL(draft.relativePath)), try Data(contentsOf: video))
+    XCTAssertTrue(try galleryScratchFiles(h.root).isEmpty)
+    try await h.close()
+  }
+
+  func testGalleryImportRejectsAnEmptyFileAndCancelsAWaitingProvider() async throws {
+    let h = try await RepositoryHarness.open()
+    let media = MediaStore(store: h.store)
+    defer { media.close() }
+    let empty = h.root.appendingPathComponent("empty.jpg")
+    try Data().write(to: empty)
+    do {
+      _ = try await StudioAttachmentImport.stage(galleryProvider(file: empty, type: .jpeg), media: media)
+      XCTFail("Пустой файл должен быть отклонён")
+    } catch MediaError.unavailable {}
+
+    let started = expectation(description: "Начата загрузка файла галереи")
+    let cancelled = expectation(description: "Галерея получила отмену")
+    let waiting = NSItemProvider()
+    waiting.registerFileRepresentation(
+      forTypeIdentifier: UTType.jpeg.identifier, fileOptions: [], visibility: .all
+    ) { _ in
+      let progress = Progress(totalUnitCount: 1)
+      progress.isCancellable = true
+      progress.cancellationHandler = { cancelled.fulfill() }
+      started.fulfill()
+      return progress
+    }
+    let task = Task { try await StudioAttachmentImport.stage(waiting, media: media) }
+    await fulfillment(of: [started], timeout: 5)
+    task.cancel()
+    do {
+      _ = try await task.value
+      XCTFail("Отмена должна остановить импорт")
+    } catch MediaError.cancelled {}
+    await fulfillment(of: [cancelled], timeout: 5)
+    XCTAssertTrue(try galleryScratchFiles(h.root).isEmpty)
+    try await h.close()
+  }
+
+  private func galleryProvider(file: URL, type: UTType) -> NSItemProvider {
+    let provider = NSItemProvider()
+    provider.registerFileRepresentation(
+      forTypeIdentifier: type.identifier, fileOptions: [], visibility: .all
+    ) { reply in
+      reply(file, false, nil)
+      return nil
+    }
+    return provider
+  }
+
+  private func galleryScratchFiles(_ root: URL) throws -> [String] {
+    let directory = root.appendingPathComponent("attachment-scratch")
+    guard FileManager.default.fileExists(atPath: directory.path) else { return [] }
+    return try FileManager.default.subpathsOfDirectory(atPath: directory.path)
+      .filter { URL(fileURLWithPath: $0).pathExtension != "" }
+  }
+
   // Заполняем память подготовленным размытым кадром и скрываем экран вне перехода. Проверяем, что
   // исчезла и сама картинка, и учтённая память.
   func testLeavingStudioOutsideNavigationReleasesCachedBlurPixels() async throws {
@@ -315,9 +734,45 @@ private final class NativeDecodeProbe {
     var changed = try XCTUnwrap(last)
     changed.tinyPreview = "AA=="
     XCTAssertNil(media.cachedTinyPreview(changed), "Changed inline bytes cannot reuse another tiny")
-    let held = try XCTUnwrap(media.cachedTinyPreview(try XCTUnwrap(last)))
+    let asset = try XCTUnwrap(last)
+    let held = try XCTUnwrap(media.cachedTinyPreview(asset))
+    let reused: PreparedImage = try await withCheckedThrowingContinuation { continuation in
+      _ = media.tinyPreview(asset) { continuation.resume(with: $0) }
+    }
+    XCTAssertTrue(reused.image === held.image)
+    reused.close()
+
+    let cancelled = expectation(description: "Вытесненная привязка не получает кадр из памяти")
+    let removal = media.tinyPreview(asset) { result in
+      switch result {
+      case .success(let late):
+        late.close()
+        XCTFail("Отменённый запрос получил кадр")
+      case .failure(let error):
+        XCTAssertEqual(error as? MediaError, .cancelled)
+      }
+      cancelled.fulfill()
+    }
+    removal.cancel()
+    await fulfillment(of: [cancelled], timeout: 3)
+    let cachedBytes = media.bytesUsed
+    var damaged = asset
+    damaged.tinyPreview = "/9j/AA=="
+    do {
+      let wrong: PreparedImage = try await withCheckedThrowingContinuation { continuation in
+        _ = media.tinyPreview(damaged) { continuation.resume(with: $0) }
+      }
+      wrong.close()
+      XCTFail("Оборванная миниатюра не должна становиться кадром")
+    } catch {
+      XCTAssertEqual(error as? MediaError, .corrupt)
+    }
+    let preserved = try XCTUnwrap(media.cachedTinyPreview(asset))
+    XCTAssertTrue(preserved.image === held.image)
+    preserved.close()
+    XCTAssertEqual(media.bytesUsed, cachedBytes)
     media.trimMemory()
-    XCTAssertNil(media.cachedTinyPreview(try XCTUnwrap(last)))
+    XCTAssertNil(media.cachedTinyPreview(asset))
     XCTAssertEqual(media.bytesUsed, one, "Only the explicitly held visible frame may survive")
     held.close()
     XCTAssertEqual(media.bytesUsed, 0)
@@ -804,6 +1259,14 @@ private final class NativeDecodeProbe {
       })
     }
     await fulfillment(of: [started], timeout: 2)
+    if mode == .original {
+      do {
+        try await media.recover()
+        XCTFail("Восстановление не должно работать одновременно с чтением файлов")
+      } catch {
+        XCTAssertEqual(error as? MediaError, .unavailable)
+      }
+    }
     let premature = expectation(description: "Filesystem inspection waits for worker admission")
     premature.isInverted = true
     let rejected = expectation(description: "Owned path rules reject the escape after admission")
@@ -841,6 +1304,7 @@ private final class NativeDecodeProbe {
     for read in blockingReads { await read.value }
     await task?.value
     XCTAssertEqual(replies, 1)
+    if mode == .original { try await media.recover() }
     media.close()
     XCTAssertEqual(media.bytesUsed, 0)
     try await h.close()
@@ -1390,13 +1854,144 @@ private final class NativeDecodeProbe {
       if case .success = result { XCTFail("closed admission granted") }
       cancelled.fulfill()
     }
+    let pendingStop = try XCTUnwrap(lateStop)
     late.close()
-    lateStop?()
     owner.release()
     await fulfillment(of: [cancelled], timeout: 2)
+    pendingStop()
+    await withCheckedContinuation { continuation in
+      DispatchQueue.main.async { continuation.resume() }
+    }
     XCTAssertEqual(replies, 1)
     XCTAssertEqual(late.captureActiveCount, 0)
   }
+
+  func testReleasingCaptureFromAWorkerReturnsTheSlotOnTheMainThreadOnlyOnce() async throws {
+    struct WorkerRelease: @unchecked Sendable {
+      let lease: CaptureLease
+    }
+    let admission = MediaAdmission()
+    defer { admission.close() }
+    let capture: CaptureLease = try await withCheckedThrowingContinuation { continuation in
+      admission.acquire(.photo) { continuation.resume(with: $0) }
+    }
+    XCTAssertEqual(admission.captureActiveCount, 1)
+    let released = expectation(description: "Камера освобождена на главном потоке")
+    released.assertForOverFulfill = true
+    let observation = MediaAdmission.observePreviewAvailability {
+      XCTAssertTrue(Thread.isMainThread)
+      XCTAssertEqual(admission.captureActiveCount, 0)
+      released.fulfill()
+    }
+    let release = WorkerRelease(lease: capture)
+    DispatchQueue.global(qos: .utility).async {
+      release.lease.release()
+      release.lease.release()
+    }
+    await fulfillment(of: [released], timeout: 3)
+    MediaAdmission.removePreviewObserver(observation)
+    let next: CaptureLease = try await withCheckedThrowingContinuation { continuation in
+      admission.acquire(.photo) { continuation.resume(with: $0) }
+    }
+    XCTAssertEqual(admission.captureActiveCount, 1)
+    next.release()
+    XCTAssertEqual(admission.captureActiveCount, 0)
+  }
+
+  func testUnsupportedTrackCannotBePublishedUnderTheWrongMediaType() async throws {
+    let harness = try await RepositoryHarness.open()
+    let media = MediaStore(store: harness.store)
+    defer { media.close() }
+    let fixtures = try XCTUnwrap(
+      Bundle(for: RepositoryHarness.self).url(forResource: "fixtures", withExtension: nil))
+    let audio = fixtures.appendingPathComponent("media/voice-00.m4a")
+    let video = fixtures.appendingPathComponent("bounds/video-over-one-minute.mp4")
+    let expected = try await media.stage(sourceURL: video, mime: "video/mp4")
+    let original = try media.fileURL(expected.relativePath)
+    for (source, mime) in [(audio, "video/mp4"), (video, "audio/mp4")] {
+      do {
+        _ = try await media.stage(sourceURL: source, mime: mime)
+        XCTFail("Файл без требуемой дорожки не должен попасть в историю")
+      } catch {
+        XCTAssertEqual(error as? MediaError, .corrupt)
+      }
+    }
+    let objects = original.deletingLastPathComponent()
+    let published = try FileManager.default.contentsOfDirectory(atPath: objects.path)
+    XCTAssertEqual(published, [original.lastPathComponent])
+    XCTAssertEqual(try Data(contentsOf: original), try Data(contentsOf: video))
+    try await harness.close()
+  }
+
+  func testPNGExceedingThePixelLimitIsNotPublished() async throws {
+    let harness = try await RepositoryHarness.open()
+    let media = MediaStore(store: harness.store)
+    defer { media.close() }
+    let atLimit = harness.root.appendingPathComponent("at-limit.png")
+    let overLimit = harness.root.appendingPathComponent("over-limit.png")
+    for (url, width) in [(atLimit, 4000), (overLimit, 4001)] {
+      let output = try XCTUnwrap(CGImageDestinationCreateWithURL(
+        url as CFURL, UTType.png.identifier as CFString, 1, nil))
+      CGImageDestinationAddImage(output, mediaTestImage(width, 4000), nil)
+      XCTAssertTrue(CGImageDestinationFinalize(output))
+    }
+
+    let draft = try await media.stage(sourceURL: atLimit, mime: "image/png")
+    XCTAssertEqual(draft.rawWidth, 4000)
+    XCTAssertEqual(draft.rawHeight, 4000)
+    do {
+      _ = try await media.stage(sourceURL: overLimit, mime: "image/png")
+      XCTFail("Слишком большой PNG не должен попасть в хранилище")
+    } catch {
+      XCTAssertEqual(error as? MediaError, .unavailable)
+    }
+    let original = try media.fileURL(draft.relativePath)
+    XCTAssertEqual(
+      try FileManager.default.contentsOfDirectory(atPath: original.deletingLastPathComponent().path),
+      [original.lastPathComponent])
+    try await harness.close()
+  }
+
+  func testPhotoImportCancelledAfterItsRenameDoesNotLeaveADuplicate() async throws {
+    let harness = try await RepositoryHarness.open()
+    let media = MediaStore(store: harness.store)
+    defer { media.close() }
+    let fixtures = try XCTUnwrap(
+      Bundle(for: RepositoryHarness.self).url(forResource: "fixtures", withExtension: nil))
+    let source = fixtures.appendingPathComponent(
+      "real-media/backend-824d66cce0d64409ad4888a13792c7d4.jpg")
+    let saved = try await media.stage(sourceURL: source, mime: "image/jpeg")
+    let original = try media.fileURL(saved.relativePath)
+    let folder = original.deletingLastPathComponent()
+    let cancellation = MediaCancellation()
+    var pendingFile: URL?
+    let importTask = Task {
+      // Рабочая очередь записывает файл, пока поток экрана ещё не принял результат.
+      DispatchQueue.main.async {
+        let deadline = ProcessInfo.processInfo.systemUptime + 3
+        while pendingFile == nil, ProcessInfo.processInfo.systemUptime < deadline {
+          pendingFile = try? FileManager.default.contentsOfDirectory(
+            at: folder, includingPropertiesForKeys: nil
+          ).first { $0.path != original.path }
+          if pendingFile == nil { Thread.sleep(forTimeInterval: 0.005) }
+        }
+        cancellation.cancel()
+      }
+      return try await media.stage(sourceURL: source, mime: "image/jpeg")
+    }
+    cancellation.onCancel { importTask.cancel() }
+    switch await importTask.result {
+    case .success:
+      XCTFail("Закрытый экран не должен получить новый файл")
+    case .failure(let error):
+      XCTAssertEqual(error as? MediaError, .cancelled)
+    }
+    XCTAssertFalse(FileManager.default.fileExists(atPath: try XCTUnwrap(pendingFile).path))
+    XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: folder.path), [original.lastPathComponent])
+    XCTAssertEqual(try Data(contentsOf: original), try Data(contentsOf: source))
+    try await harness.close()
+  }
+
   // Имитируем ошибку записи и потерю ответа после сохранения. Восстановление не удаляет оригинал
   // со ссылкой, а повтор не создаёт лишнее сообщение. В конце сверяем целостность базы.
   func testCrashRecoveryDiskFullAndLostReplyPreserveReferencedOriginal() async throws {

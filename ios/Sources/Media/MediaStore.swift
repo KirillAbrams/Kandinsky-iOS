@@ -482,9 +482,7 @@ import Darwin
             : resolved.0
           if fetch.isCancelled { throw MediaError.cancelled }
           do {
-            let image = try Self.decode(
-              url: normal, mime: resolved.1.hasPrefix("video/") ? "image/jpeg" : resolved.1,
-              maxPixel: size)
+            let image = try Self.decodeImage(url: normal, maxPixel: size)
             if let gallery, let galleryEpoch {
               guard gallery.epoch() == galleryEpoch, !fetch.isCancelled else {
                 throw MediaError.cancelled
@@ -663,28 +661,30 @@ import Darwin
     _ attachment: Attachment, localOnly: Bool = false
   ) async throws -> MediaPlaybackSource {
     if localOnly {
-      let provider = remoteThumbnailProvider, token = MediaCancellation(), root = store.root
+      let provider = remoteThumbnailProvider, root = store.root
+      let fileRead = MediaCancellation(), queuedRead = MediaCancellation()
       return try await withTaskCancellationHandler {
         try await withCheckedThrowingContinuation { continuation in
           let request = mediaDecodeQueue.submit(
             work: {
               let file: URL?
               if let provider {
-                file = try provider.cached(attachment, preview: false, token: token)?.0
+                file = try provider.cached(attachment, preview: false, token: fileRead)?.0
               } else {
                 let url = try Self.fileURL(root: root, relative: attachment.relativePath)
                 file = FileManager.default.fileExists(atPath: url.path) ? url : nil
               }
-              guard !token.isCancelled, let file else {
-                token.cancel()
+              guard !fileRead.isCancelled, let file else {
+                fileRead.cancel()
                 throw MediaError.unavailable
               }
-              return MediaPlaybackSource(file: file, onClose: { token.cancel() })
+              return MediaPlaybackSource(file: file, onClose: { fileRead.cancel() })
             }, dispose: { $0.close() }, completion: { continuation.resume(with: $0) })
-          token.onCancel { request.cancel() }
+          queuedRead.onCancel { request.cancel() }
         }
       } onCancel: {
-        token.cancel()
+        queuedRead.cancel()
+        fileRead.cancel()
       }
     }
     guard let remote = remotePlayback else {
@@ -727,7 +727,8 @@ import Darwin
   func ensureOriginal(_ attachment: Attachment, progress: @escaping (Double) -> Void = { _ in })
     async throws -> URL
   {
-    let remote = remoteFile, fetch = MediaCancellation(), root = store.root
+    let remote = remoteFile, root = store.root
+    let fetch = MediaCancellation(), queuedRead = MediaCancellation()
     fetch.onProgress { value in Task { @MainActor in progress(value) } }
     let resolved: URL = try await withTaskCancellationHandler(
       operation: {
@@ -739,9 +740,12 @@ import Darwin
               let url = try Self.fileURL(root: root, relative: attachment.relativePath)
               return try remote?(attachment, false, fetch).0 ?? url
             }, dispose: { _ in }, completion: { continuation.resume(with: $0) })
-          fetch.onCancel { request.cancel() }
+          queuedRead.onCancel { request.cancel() }
         }
-      }, onCancel: { fetch.cancel() })
+      }, onCancel: {
+        queuedRead.cancel()
+        fetch.cancel()
+      })
     return resolved
   }
   private var navigating = false
@@ -966,30 +970,21 @@ import Darwin
     }
     return result
   }
-  // Читает уменьшенное фото или первый кадр видео с поправкой поворота. Переносит пиксели в
-  // согласованный формат и отказывает, если размер вышел за предел.
-  nonisolated private static func decode(url: URL, mime: String, maxPixel: Int) throws -> CGImage {
-    let image: CGImage
-    if mime.hasPrefix("video/") {
-      let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
-      generator.appliesPreferredTrackTransform = true
-      generator.maximumSize = CGSize(width: maxPixel, height: maxPixel)
-      image = try generator.copyCGImage(at: .zero, actualTime: nil)
-    } else {
-      guard
-        let source = CGImageSourceCreateWithURL(
-          url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
-        let value = CGImageSourceCreateThumbnailAtIndex(
-          source, 0,
-          [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: maxPixel,
-            kCGImageSourceShouldCacheImmediately: true
-          ] as CFDictionary)
-      else { throw MediaError.corrupt }
-      image = value
-    }
+  // Читает фото или подготовленный кадр видео. Учитывает поворот, ограничивает размер и
+  // переводит пиксели в общий формат.
+  nonisolated private static func decodeImage(url: URL, maxPixel: Int) throws -> CGImage {
+    guard
+      let source = CGImageSourceCreateWithURL(
+        url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
+      let image = CGImageSourceCreateThumbnailAtIndex(
+        source, 0,
+        [
+          kCGImageSourceCreateThumbnailFromImageAlways: true,
+          kCGImageSourceCreateThumbnailWithTransform: true,
+          kCGImageSourceThumbnailMaxPixelSize: maxPixel,
+          kCGImageSourceShouldCacheImmediately: true
+        ] as CFDictionary)
+    else { throw MediaError.corrupt }
     guard max(image.width, image.height) <= maxPixel,
       let context = CGContext(
         data: nil, width: image.width, height: image.height, bitsPerComponent: 8,

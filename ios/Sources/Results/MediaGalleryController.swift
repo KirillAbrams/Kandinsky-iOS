@@ -218,7 +218,11 @@ import UIKit
     where !ids.contains(id)
       || wanted.first(where: { $0.id == id }).map({ !$0.hasSameMedia(as: page.entry) }) == true
     {
-      if page.photo.downloadPausedByUser { cancelled.insert(id) }
+      if page.photo.downloadPausedByUser {
+        cancelled.insert(id)
+      } else {
+        cancelled.remove(id)
+      }
       if surface.superview === page.photo.view { retireVideo() }
       page.photo.willMove(toParent: nil)
       page.photo.closePage()

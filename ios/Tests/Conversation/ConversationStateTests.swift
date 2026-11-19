@@ -7,6 +7,42 @@ import XCTest
 @testable import Kandinsky
 
 @MainActor final class ConversationStateTests: XCTestCase {
+  func testExistingAttachmentTypesKeepTheirOwnKindWhenSentFromTheDraft() async throws {
+    let h = try await RepositoryHarness.open()
+    let state = ConversationState(repository: h.repo)
+    let media = MediaStore(store: h.store)
+    defer { media.close() }
+    let fixtures = try XCTUnwrap(
+      Bundle(for: RepositoryHarness.self).url(forResource: "fixtures", withExtension: nil))
+    let clip = "real-media/backend-990da02cd31e46cfb8fd630c293f3489.mp4"
+    let inputs: [(file: String, mime: String, kind: MessageKind)] = [
+      ("real-media/backend-824d66cce0d64409ad4888a13792c7d4.jpg", "image/jpeg", .photo),
+      ("catalogue-media/gif-waterfall-0.gif", "image/gif", .gif),
+      ("media/welcome.png", "image/png", .sticker),
+      ("media/voice-00.m4a", "audio/mp4", .voice),
+      (clip, "video/mp4", .round),
+      (clip, "video/mp4", .video),
+    ]
+    try await state.open(chatID: 2)
+    for input in inputs {
+      var attachment = try await media.stage(
+        sourceURL: fixtures.appendingPathComponent(input.file), mime: input.mime)
+      if input.kind == .sticker { attachment.thumbnailKey = "sticker" }
+      if input.kind == .round { attachment.thumbnailKey = "round" }
+      state.editDraft(Draft(text: "Файл " + input.kind.rawValue, attachmentDrafts: [attachment]))
+      await state.send()
+      XCTAssertNil(state.lastError)
+    }
+    let sent = try await h.repo.history(PageRequest(chatID: 2)).rows
+    XCTAssertEqual(sent.map(\.kind), inputs.map(\.kind))
+    XCTAssertEqual(sent.map(\.caption), inputs.map { "Файл " + $0.kind.rawValue })
+    XCTAssertTrue(sent.allSatisfy { $0.text.isEmpty && $0.attachments.count == 1 })
+    let cleared = try await h.repo.draft(chatID: 2)
+    XCTAssertTrue(cleared.attachmentDrafts.isEmpty)
+    await state.close()
+    try await h.close()
+  }
+
   // Меняет текст и ждёт автоматическую запись без отправки или закрытия. Проверяет, что последняя
   // правка сохранилась и задача не отменила себя.
   func testIdleDraftSavesLatestInputWithoutSendingOrClosing() async throws {
@@ -438,6 +474,57 @@ import XCTest
     await state.close()
     try await h.close()
   }
+  func testBatchRetriesTheSameAcceptedFileWhenSavingItsRemainderFails() async throws {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let h = try await RepositoryHarness.open(root: folder)
+    let media = MediaStore(store: h.store)
+    defer { media.close() }
+    let source = try XCTUnwrap(
+      Bundle(for: RepositoryHarness.self).url(forResource: "fixtures", withExtension: nil)
+    ).appendingPathComponent("media/photo-000.jpg")
+    let first = try await media.stage(sourceURL: source, mime: "image/jpeg")
+    let second = try await media.stage(sourceURL: source, mime: "image/jpeg")
+    let commands = [first, second].map {
+      SendCommand(
+        operationID: UUID().uuidString, chatID: 2, kind: .photo, attachments: [$0])
+    }
+    let firstID = commands[0].operationID
+    try await h.repo.saveDraft(chatID: 2, draft: Draft(text: "Отдельный черновик"))
+    let state = ConversationState(repository: h.repo)
+    try await state.open(chatID: 2)
+    try await h.store.perform { db in
+      try db.execute("""
+        CREATE TRIGGER refuse_shortened_batch BEFORE UPDATE OF attachmentDraft ON drafts
+        WHEN NEW.attachmentDraft NOT LIKE '%\(firstID)%'
+        BEGIN SELECT RAISE(ABORT,'batch remainder refused'); END
+        """)
+    }
+
+    await state.sendMediaBatch(commands)
+    XCTAssertEqual(state.lastError as? RepoError, .invalidInput)
+    XCTAssertEqual(state.draft.pendingMediaBatch?.map(\.operationID), commands.map(\.operationID))
+    let stored = try await h.repo.draft(chatID: 2)
+    XCTAssertEqual(stored.pendingMediaBatch?.map(\.operationID), commands.map(\.operationID))
+    let accepted = try await h.messageCount(chatID: 2)
+    XCTAssertEqual(accepted, 1)
+
+    await state.sendMediaBatch([commands[1]])
+    XCTAssertEqual(state.lastError as? RepoError, .invalidInput)
+    XCTAssertEqual(state.draft.pendingMediaBatch?.count, 2)
+    try await h.store.perform { try $0.execute("DROP TRIGGER refuse_shortened_batch") }
+    await state.send()
+    XCTAssertNil(state.lastError)
+    XCTAssertNil(state.draft.pendingMediaBatch)
+    XCTAssertEqual(state.draft.text, "Отдельный черновик")
+    let rows = try await h.store.perform { db in
+      try db.rows("SELECT token FROM operations ORDER BY messageId")
+    }
+    XCTAssertEqual(rows.map { $0["token"]!.string }, commands.map(\.operationID))
+    await state.close()
+    try await h.close()
+  }
+
   // Проверяет черновик после отказа и потери ответа, затем повторяет отправку с прежним номером.
   // Успех очищает отправленный ввод, а следующий черновик и точка чтения переживают новое
   // открытие.

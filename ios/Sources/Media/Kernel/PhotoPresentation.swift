@@ -25,10 +25,6 @@ struct PhotoPresentation: Equatable, Sendable {
     let scale = max(width / sw, height / sh)
     let x = (width - sw * scale) / 2, y = (height - sh * scale) / 2
     let a, b, c, d, tx, ty: Double
-
-  var affineTransform: CGAffineTransform {
-    CGAffineTransform(a: a, b: b, c: c, d: d, tx: tx, ty: ty)
-  }
     switch orientation {
     case 1: (a, b, c, d, tx, ty) = (1, 0, 0, 1, 0, 0)
     case 2: (a, b, c, d, tx, ty) = (-1, 0, 0, 1, w, 0)

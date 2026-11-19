@@ -57,6 +57,141 @@ import XCTest
     XCTAssertEqual(budget.bytes, 0, "Obsolete pixels must release byte ownership")
   }
 
+  func testGalleryEvictsTheOldestSavedCoverWhenItReachesItsLimit() throws {
+    let example = try fixture()
+    let disk = VideoCoverDiskCache(root: example.root)
+    defer { disk.close(); example.close() }
+    let jpeg = try XCTUnwrap(UIImage(cgImage: example.image).jpegData(compressionQuality: 0.75))
+    let epoch = disk.epoch()
+    let first = "remote/oldest.mp4"
+    try disk.storeGalleryFile(jpeg, relative: first, epoch: epoch)
+    let firstURL = try XCTUnwrap(disk.galleryFile(first))
+    try FileManager.default.setAttributes(
+      [.modificationDate: Date(timeIntervalSince1970: 1)], ofItemAtPath: firstURL.path)
+    for index in 1...256 {
+      try disk.storeGalleryFile(jpeg, relative: "remote/gallery-\(index).mp4", epoch: epoch)
+    }
+
+    XCTAssertNil(disk.galleryFile(first))
+    let newest = try XCTUnwrap(disk.galleryFile("remote/gallery-256.mp4"))
+    XCTAssertEqual(try Data(contentsOf: newest), jpeg)
+    let files = try FileManager.default.contentsOfDirectory(atPath: newest.deletingLastPathComponent().path)
+    XCTAssertEqual(files.filter { $0.hasSuffix("-gallery.jpg") }.count, 256)
+  }
+
+  func testGalleryRejectsACoverDirectoryOutsideTheAccount() throws {
+    let example = try fixture()
+    let directory = example.root.appendingPathComponent("media/video-covers")
+    let outside = example.root.appendingPathComponent("another-account")
+    let fm = FileManager.default
+    try fm.moveItem(at: directory, to: outside)
+    try fm.createSymbolicLink(at: directory, withDestinationURL: outside)
+    let disk = VideoCoverDiskCache(root: example.root)
+    defer { disk.close(); example.close() }
+    let jpeg = try XCTUnwrap(UIImage(cgImage: example.image).jpegData(compressionQuality: 0.75))
+    let before = try fm.contentsOfDirectory(atPath: outside.path).sorted()
+
+    XCTAssertThrowsError(try disk.storeGalleryFile(jpeg, relative: "remote/next.mp4", epoch: disk.epoch())) {
+      XCTAssertEqual($0 as? MediaError, .corrupt)
+    }
+    XCTAssertNil(disk.galleryFile("remote/next.mp4"))
+    XCTAssertEqual(try fm.contentsOfDirectory(atPath: outside.path).sorted(), before)
+  }
+
+  func testUnreadableFrameLayoutDoesNotKeepItsMemoryReservation() throws {
+    let example = try fixture()
+    let disk = VideoCoverDiskCache(root: example.root)
+    defer { disk.close(); example.close() }
+    let directory = example.root.appendingPathComponent("media/video-covers")
+    let frame = try XCTUnwrap(FileManager.default.contentsOfDirectory(
+      at: directory, includingPropertiesForKeys: nil).first { $0.pathExtension == "frame" })
+    let original = try Data(contentsOf: frame)
+    var damaged = original
+    // Байты пикселей целы, но формат только с прозрачностью не подходит для тридцатидвухбитного кадра.
+    damaged.replaceSubrange(20..<24, with: [UInt8(CGImageAlphaInfo.alphaOnly.rawValue), 0, 0, 0])
+    try damaged.write(to: frame, options: .atomic)
+    let budget = ImageByteBudget()
+
+    XCTAssertNil(disk.readPixels(example.key, budget: budget))
+    XCTAssertEqual(budget.bytes, 0)
+    try original.write(to: frame, options: .atomic)
+    let restored = try XCTUnwrap(disk.readPixels(example.key, budget: budget))
+    XCTAssertEqual(pixels(restored.image), pixels(example.image))
+    restored.closeOwner()
+    XCTAssertEqual(budget.bytes, 0)
+  }
+
+  func testAnExistingDiskCoverCanBeRetriedAfterTheMemoryLimitIncreases() async throws {
+    let example = try fixture()
+    let budget = ImageByteBudget()
+    let bytes = example.image.bytesPerRow * example.image.height
+    budget.limit = bytes * 2
+    let cache = VideoPlaybackCache(budget: budget, root: example.root)
+    defer { cache.close(); example.close() }
+
+    let rejected = expectation(description: "Кадр не помещается в выделенную долю памяти видео")
+    _ = cache.restoreCover(example.key) { result in
+      switch result {
+      case .success(let frame):
+        frame.close()
+        XCTFail("Кадр превысил долю памяти для видео")
+      case .failure(let error): XCTAssertEqual(error as? MediaError, .unavailable)
+      }
+      rejected.fulfill()
+    }
+    await fulfillment(of: [rejected], timeout: 3)
+    XCTAssertEqual(budget.bytes, 0)
+
+    budget.limit = bytes * 6
+    let restored = expectation(description: "Перемещение в память той же копии при повторе")
+    _ = cache.restoreCover(example.key) { result in
+      do {
+        let frame = try result.get()
+        XCTAssertEqual(self.pixels(frame.image), self.pixels(example.image))
+        frame.close()
+      } catch { XCTFail("Кадр должен читаться с диска: \(error)") }
+      restored.fulfill()
+    }
+    await fulfillment(of: [restored], timeout: 3)
+    cache.close()
+    try await awaitReleased(budget)
+  }
+
+  func testMemoryPressureKeepsTheFrameVisibleWhenThereIsNoRoomForTheDiskWrite() async throws {
+    let example = try fixture()
+    let budget = ImageByteBudget()
+    let bytes = example.image.bytesPerRow * example.image.height
+    budget.limit = bytes * 3 + 16
+    let otherImage = try XCTUnwrap(budget.reserve(4096))
+    let cache = VideoPlaybackCache(budget: budget, root: example.root)
+    let disk = VideoCoverDiskCache(root: example.root)
+    let key = example.keyWithID(81021)
+    defer { otherImage.close(); cache.close(); disk.close(); example.close() }
+
+    cache.rememberFrame(key: key, generation: cache.generation, width: 64, height: 64) { _, _ in
+      example.image
+    }
+    let visible = try XCTUnwrap(cache.cover(key))
+    XCTAssertEqual(pixels(visible.image), pixels(example.image))
+    visible.close()
+    XCTAssertEqual(budget.bytes, bytes + 4096)
+    let readBudget = ImageByteBudget()
+    XCTAssertNil(disk.readPixels(key, budget: readBudget))
+
+    otherImage.close()
+    cache.rememberFrame(key: key, generation: cache.generation, width: 64, height: 64) { _, _ in
+      example.image
+    }
+    var stored: ImagePixels?
+    for _ in 0..<250 where stored == nil {
+      stored = disk.readPixels(key, budget: readBudget)
+      if stored == nil { try await Task.sleep(for: .milliseconds(10)) }
+    }
+    XCTAssertEqual(pixels(stored?.image), pixels(example.image))
+    stored?.closeOwner()
+    XCTAssertEqual(readBudget.bytes, 0)
+  }
+
   // Оставляет в памяти обычную картинку и восстанавливает чёткий кадр с диска. Проверяет
   // отсутствие мелькания картинки и замену правильным остановленным кадром.
   func testReturningVideoPrefersTheDiskFrameEvenWithAPosterInMemory() async throws {
@@ -112,6 +247,84 @@ import XCTest
     XCTAssertEqual(pixels(updated?.image), pixels(paused))
     updated?.close()
     slot.close(); media.close(); try await h.close()
+  }
+
+  func testAQueuedRefreshWithoutMemoryPreservesTheDisplayedCoverAndCanBeRetried() async throws {
+    let example = try fixture()
+    let budget = ImageByteBudget()
+    let cache = VideoPlaybackCache(budget: budget)
+    defer {
+      cache.close()
+      example.close()
+    }
+    let key = example.key
+    let image = example.image
+    cache.rememberFrame(
+      key: key, generation: cache.generation, width: image.width, height: image.height
+    ) { _, _ in image }
+    let bytes = budget.bytes
+    XCTAssertGreaterThan(bytes, 0)
+    let sourceBytes = 256
+    budget.limit = bytes + sourceBytes + 1024
+    cache.enqueueFrame(
+      key: key, generation: cache.generation, width: image.width, height: image.height,
+      sourceBytes: sourceBytes
+    ) { _, _ in image }
+    let retained = try XCTUnwrap(cache.cover(key), "При нехватке памяти чёткий кадр остаётся видимым")
+    XCTAssertTrue(retained.image === image)
+    retained.close()
+    XCTAssertEqual(budget.bytes, bytes)
+
+    budget.limit = bytes * 8
+    let refreshed = expectation(description: "Кадр обновился после освобождения памяти")
+    cache.enqueueFrame(
+      key: key, generation: cache.generation, width: image.width, height: image.height,
+      sourceBytes: sourceBytes, published: { refreshed.fulfill() }
+    ) { _, _ in image }
+    await fulfillment(of: [refreshed], timeout: 5)
+    let current = try XCTUnwrap(cache.cover(key))
+    XCTAssertTrue(current.image === image)
+    current.close()
+  }
+
+  func testCoverRestoresFromMemoryAndReleasesReservationsForRejectedFrames() async throws {
+    let fixture = try fixture()
+    let budget = ImageByteBudget()
+    let cache = VideoPlaybackCache(budget: budget)
+    defer {
+      cache.close()
+      fixture.close()
+    }
+    let key = fixture.key
+    let generation = cache.generation
+    cache.rememberFrame(key: key, generation: generation, width: 64, height: 64) { _, _ in nil }
+    XCTAssertNil(cache.frame(key))
+    XCTAssertEqual(budget.bytes, 0)
+
+    cache.rememberFrame(key: key, generation: generation, width: 1, height: 1) { _, _ in
+      fixture.image
+    }
+    XCTAssertNil(cache.frame(key))
+    XCTAssertEqual(budget.bytes, 0)
+
+    cache.rememberFrame(key: key, generation: generation, width: 64, height: 64) { _, _ in
+      fixture.image
+    }
+    let restored = expectation(description: "Восстановили тот же кадр из памяти без файла")
+    _ = cache.restoreCover(key) { result in
+      switch result {
+      case .success(let frame):
+        XCTAssertTrue(frame.image === fixture.image)
+        frame.close()
+      case .failure(let error):
+        XCTFail("Ожидался готовый кадр: \(error)")
+      }
+      restored.fulfill()
+    }
+    await fulfillment(of: [restored], timeout: 5)
+    XCTAssertEqual(budget.bytes, fixture.image.bytesPerRow * fixture.image.height)
+    cache.clearFrames()
+    try await awaitReleased(budget)
   }
 
   // Удерживает чтение остановленного кадра вне потока экрана и сохраняет более свежий прямо

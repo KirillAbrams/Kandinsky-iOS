@@ -244,6 +244,7 @@ enum AttachmentSource { case photo, camera, video }
       ? KandinskyOptions(model: model)
       : KandinskyOptions(
         model: model, aspect: options.aspect, count: options.count, seed: options.seed)
+    draft.generationOptions = next
     state.editDraft(draft)
     selectOptions(next)
     if !previous.isEmpty {

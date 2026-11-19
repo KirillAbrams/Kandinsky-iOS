@@ -328,6 +328,68 @@ final class ScrollPreparationWindowTests: XCTestCase {
     }
   }
 
+  @MainActor func testReflowStopsInertiaBeforeItsNewDestinationLeavesTheHistory() throws {
+    let host = ChatScrollHost(canUseCompositorInertia: true)
+    host.frame = CGRect(x: 0, y: 0, width: 390, height: 400)
+    host.contentSize = CGSize(width: 390, height: 4000)
+    host.contentOffset = CGPoint(x: 0, y: 800)
+    defer { host.close() }
+    var savedAnchors = 0
+    host.onAnchor = { _ in savedAnchors += 1 }
+    var landing = CGPoint(x: 0, y: 1200)
+    host.scrollViewWillEndDragging(
+      host, withVelocity: CGPoint(x: 0, y: 0.84), targetContentOffset: &landing)
+    host.scrollViewDidEndDragging(host, willDecelerate: false)
+    let flight = try XCTUnwrap(host.compositorFlight)
+    XCTAssertEqual(flight.trajectory.destination, 1200, accuracy: 0.1)
+
+    // Уточнение строк переносит текущую точку к концу истории. Прежняя цель уже за границей.
+    host.rebaseCompositorFlight(to: 3400)
+
+    XCTAssertNil(host.compositorFlight)
+    XCTAssertEqual(host.viewportOffsetY, 3400, accuracy: 0.1)
+    XCTAssertTrue(host.plane.layer.animationKeys()?.isEmpty ?? true)
+    XCTAssertEqual(savedAnchors, 0)
+  }
+
+  @MainActor func testProgrammaticReadingPositionCancelsTheOldFling() throws {
+    let host = ChatScrollHost(canUseCompositorInertia: true)
+    host.frame = CGRect(x: 0, y: 0, width: 390, height: 400)
+    defer { host.close() }
+    let rows = (1...40).map { number in
+      let id = Int64(number)
+      return IndexedRow(messageID: id, order: OrderKey(sortKey: id, messageID: id),
+                        estimatedHeight: 100, revision: 1)
+    }
+    let start = ReadingAnchor(messageID: 9, fraction: 0.3, followsBottom: false)
+    _ = try host.index.replace(rows: rows, anchor: start, viewport: 400)
+    host.setGeometry(anchor: start)
+    var savedAnchors = 0
+    host.onAnchor = { _ in savedAnchors += 1 }
+    func startFling() throws {
+      var landing = CGPoint(x: 0, y: host.contentOffset.y + 400)
+      host.scrollViewWillEndDragging(
+        host, withVelocity: CGPoint(x: 0, y: 0.84), targetContentOffset: &landing)
+      host.scrollViewDidEndDragging(host, willDecelerate: false)
+      _ = try XCTUnwrap(host.compositorFlight)
+    }
+
+    try startFling()
+    host.setContentOffset(CGPoint(x: 0, y: 1400), animated: false)
+    host.scrollViewDidScroll(host)
+    XCTAssertNil(host.compositorFlight)
+    XCTAssertEqual(host.viewportOffsetY, 1400, accuracy: 0.1)
+
+    try startFling()
+    let selected = ReadingAnchor(messageID: 22, fraction: 0.5, followsBottom: false)
+    host.setGeometry(anchor: selected)
+    XCTAssertNil(host.compositorFlight)
+    let recovered = host.readingAnchor()
+    XCTAssertEqual(recovered.messageID, selected.messageID)
+    XCTAssertEqual(recovered.fraction, selected.fraction, accuracy: 0.01)
+    XCTAssertEqual(savedAnchors, 0)
+  }
+
   // Уменьшаем высоту видимой области между замерами движения. Запас подготовки вложений сразу
   // ограничивается тремя её высотами.
   func testMediaLeadStaysWithinThreeShortViewportsEvenBeforeTheNextMotionSample() {

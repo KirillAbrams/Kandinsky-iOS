@@ -1508,6 +1508,51 @@ extension MediaCoordinator {
     try await h.close()
   }
 
+  func testInvalidVideoReleasesTheNativePlayerBeforeTheNextResult() async throws {
+    let (harness, media, original) = try await make()
+    let admission = MediaAdmission()
+    let playback = MediaCoordinator(admission: admission, media: media)
+    defer {
+      playback.close()
+      media.close()
+      admission.close()
+    }
+    let badPath = "objects/incomplete.mp4"
+    let bytes = Data([0, 0, 0, 32])
+    try bytes.write(to: media.fileURL(badPath))
+    let bad = Attachment(
+      id: "incomplete", relativePath: badPath, mime: "video/mp4", byteSize: Int64(bytes.count),
+      rawWidth: 256, rawHeight: 256, orientation: 1, durationMs: 6_000, thumbnailKey: "incomplete")
+    let rejected = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+      playback.lastError != nil && !playback.nativeItemAttached && playback.currentMessageID == nil
+    }, object: nil)
+    playback.play(target: PlaybackTarget(attachment: bad, messageID: 1, kind: .video), localOnly: true)
+    await fulfillment(of: [rejected], timeout: 6)
+    XCTAssertEqual(playback.activePlayerCount, 0)
+
+    let invalidRound = PlaybackTarget(attachment: bad, messageID: 3, kind: .round)
+    playback.play(target: invalidRound, localOnly: true)
+    let rejectedRound = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+      playback.lastError != nil && playback.currentTarget == invalidRound
+    }, object: nil)
+    await fulfillment(of: [rejectedRound], timeout: 6)
+    XCTAssertEqual(playback.activePlayerCount, 0)
+
+    let next = PlaybackTarget(attachment: original, messageID: 2, kind: .video)
+    playback.play(target: next, localOnly: true)
+    let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+      playback.isReady && playback.currentTarget == next && playback.durationMs > 0
+    }, object: nil)
+    await fulfillment(of: [ready], timeout: 8)
+    XCTAssertNil(playback.lastError)
+    let chats = try await harness.repo.chats(matching: "")
+    playback.apply(MessageDelta(removedIDs: [next.messageID], chat: try XCTUnwrap(chats.first)))
+    XCTAssertNil(playback.currentTarget)
+    XCTAssertFalse(playback.nativeItemAttached)
+    XCTAssertEqual(playback.activePlayerCount, 0)
+    try await harness.close()
+  }
+
   // Запускаем уточнение качества у видимого файла. Старый рисунок должен оставаться доступен,
   // пока новый ещё готовится.
   func testThumbnailQualityUpgradeKeepsDisplayedPreview() async throws {
@@ -1559,11 +1604,48 @@ extension MediaCoordinator {
     try await h.close()
   }
 
+  func testCancelledOriginalReadCannotPublishALateFile() async throws {
+    let (harness, media, attachment) = try await make(mime: "image/jpeg")
+    let original = try media.fileURL(attachment.relativePath)
+    let bytes = try Data(contentsOf: original)
+    let entered = expectation(description: "Поставщик начал читать оригинал")
+    let cancelled = expectation(description: "Поставщик получил отмену")
+    let release = DispatchSemaphore(value: 0)
+    defer { release.signal(); media.close() }
+    media.remoteFile = { requested, preview, token in
+      XCTAssertEqual(requested.id, attachment.id)
+      XCTAssertFalse(preview)
+      token.onCancel { cancelled.fulfill() }
+      entered.fulfill()
+      guard release.wait(timeout: .now() + 5) == .success else { throw MediaError.io }
+      return (original, attachment.mime)
+    }
+
+    let read = Task { try await media.ensureOriginal(attachment) }
+    await fulfillment(of: [entered], timeout: 3)
+    read.cancel()
+    await fulfillment(of: [cancelled], timeout: 3)
+    release.signal()
+    switch await read.result {
+    case .success:
+      XCTFail("Опоздавший оригинал нельзя выдать закрытому экрану")
+    case .failure(let error):
+      XCTAssertEqual(error as? MediaError, .cancelled)
+    }
+
+    media.remoteFile = nil
+    let reloaded = try await media.ensureOriginal(attachment)
+    XCTAssertEqual(reloaded, original)
+    XCTAssertEqual(try Data(contentsOf: reloaded), bytes)
+    try await harness.close()
+  }
+
   // Увеличиваем фото и запрашиваем новую раскладку. Исходный размер остаётся прежним, видимая
   // рамка увеличена, а края полноэкранного изображения не скругляются.
   func testPhotoZoomRelayoutKeepsBaseGeometry() async throws {
     let (h, media, a) = try await make(mime: "image/jpeg")
-    let viewer = PhotoViewerController(attachment: a, media: media)
+    let description = String(repeating: "Подпись сохраняется при увеличении фотографии. ", count: 20)
+    let viewer = PhotoViewerController(attachment: a, media: media, caption: description)
     viewer.loadViewIfNeeded()
     viewer.view.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
     viewer.viewDidLayoutSubviews()
@@ -1579,11 +1661,114 @@ extension MediaCoordinator {
     XCTAssertEqual(
       content.layer.sublayers?.first?.cornerRadius, 0,
       "An original photo has no rounded thumbnail clipping")
+    let caption = try XCTUnwrap(viewer.view.subviews.compactMap { $0 as? UITextView }.first {
+      $0.accessibilityIdentifier == "viewer.caption"
+    })
+    XCTAssertEqual(caption.text, description)
+    XCTAssertTrue(caption.isSelectable)
+    XCTAssertGreaterThan(caption.bounds.height, 0)
+    XCTAssertLessThanOrEqual(caption.bounds.height, 180)
+    XCTAssertEqual(scroll.zoomScale, 2, accuracy: 0.01)
+
+    // После поворота окна в центре остаётся та же точка фотографии.
+    scroll.setZoomScale(3, animated: false)
+    scroll.contentOffset = CGPoint(
+      x: 0.58 * scroll.contentSize.width - scroll.bounds.width / 2,
+      y: 0.52 * scroll.contentSize.height - scroll.bounds.height / 2)
+    viewer.view.frame.size = CGSize(width: 844, height: 390)
+    viewer.viewDidLayoutSubviews()
+    XCTAssertEqual(scroll.zoomScale, 3, accuracy: 0.01)
+    XCTAssertEqual(
+      (scroll.contentOffset.x + scroll.bounds.width / 2) / scroll.contentSize.width, 0.58,
+      accuracy: 0.01)
+    XCTAssertEqual(
+      (scroll.contentOffset.y + scroll.bounds.height / 2) / scroll.contentSize.height, 0.52,
+      accuracy: 0.01)
+    XCTAssertEqual(caption.text, description)
     viewer.beginAppearanceTransition(false, animated: false)
     viewer.endAppearanceTransition()
     media.close()
     try await h.close()
   }
+  func testChatAccessibilityCanCancelAndRetryTheVisibleMediaDownload() async throws {
+    let (h, media, image) = try await make(mime: "image/gif")
+    let original = try media.fileURL(image.relativePath)
+    let draft = AttachmentDraft(
+      id: image.id, relativePath: image.relativePath, mime: image.mime, byteSize: image.byteSize,
+      rawWidth: image.rawWidth, rawHeight: image.rawHeight, orientation: image.orientation,
+      thumbnailKey: image.thumbnailKey)
+    let added = try await h.repo.send(
+      SendCommand(operationID: UUID().uuidString, chatID: 2, kind: .gif, attachments: [draft]))
+    let row = try XCTUnwrap(added.inserted.first)
+    try await h.store.perform { db in
+      try db.execute(
+        "UPDATE attachments SET relativePath=? WHERE id=?",
+        [.text("remote/0123456789abcdef0123456789abcdef.gif"), .text(image.id)])
+    }
+    let attempts = Counter()
+    let resume = DispatchSemaphore(value: 0)
+    let cancelled = expectation(description: "Отмена дошла до передачи видимого изображения")
+    media.remoteFile = { claimed, _, token in
+      XCTAssertEqual(claimed.id, image.id)
+      if attempts.increment() == 1 {
+        token.onCancel { resume.signal() }
+        token.reportProgress(0.32)
+        guard resume.wait(timeout: .now() + 10) == .success, token.isCancelled else {
+          throw MediaError.unavailable
+        }
+        cancelled.fulfill()
+        throw MediaError.cancelled
+      }
+      return (original, image.mime)
+    }
+
+    let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+    let previous = scene.windows.first { $0.isKeyWindow }
+    let window = UIWindow(windowScene: scene)
+    let parent = UIViewController()
+    window.rootViewController = parent
+    window.makeKeyAndVisible()
+    let host = ChatScrollHost()
+    host.frame = CGRect(x: 0, y: 80, width: 390, height: 600)
+    parent.view.addSubview(host)
+    host.configureMedia(media)
+    defer {
+      resume.signal()
+      host.close()
+      media.close()
+      window.isHidden = true
+      previous?.makeKey()
+    }
+    try await host.open(chatID: 2, repository: h.repo, anchor: nil)
+
+    func action() -> UIAccessibilityElement? {
+      host.subviews.flatMap { $0.accessibilityElements ?? [] }
+        .compactMap { $0 as? UIAccessibilityElement }
+        .first { $0.accessibilityIdentifier == "media.load.\(row.id)" }
+    }
+    let downloading = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+      action()?.accessibilityLabel == "Отменить загрузку"
+    }, object: nil)
+    await fulfillment(of: [downloading], timeout: 8)
+    XCTAssertTrue(try XCTUnwrap(action()).accessibilityActivate())
+    await fulfillment(of: [cancelled], timeout: 8)
+
+    let retry = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+      action()?.accessibilityLabel == "Повторить загрузку"
+    }, object: nil)
+    await fulfillment(of: [retry], timeout: 6)
+    XCTAssertTrue(try XCTUnwrap(action()).accessibilityActivate())
+    let shown = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+      let preview = host.scene.preview(row.id)
+      defer { preview?.close() }
+      return action() == nil && preview?.image != nil
+    }, object: nil)
+    await fulfillment(of: [shown], timeout: 8)
+    XCTAssertEqual(attempts.value, 2)
+    XCTAssertEqual(try Data(contentsOf: original).count, Int(image.byteSize))
+    try await h.close()
+  }
+
   // Открываем фото с маленьким кадром и задерживаем чтение оригинала. Проверяем, что отмена
   // доступна, прекращает сам запрос и оставляет уже показанное изображение.
   func testPhotoViewerCancelsOriginalDownloadAndKeepsPreview() async throws {
@@ -1623,6 +1808,106 @@ extension MediaCoordinator {
     await fulfillment(of: [cancelled], timeout: 3)
     viewer.beginAppearanceTransition(false, animated: false)
     viewer.endAppearanceTransition()
+    try await h.close()
+  }
+
+  func testResumingAFinishedVideoStartsAtTheBeginningWithTheSamePlayerItem() async throws {
+    let (h, media, video) = try await make()
+    let admission = MediaAdmission()
+    let player = MediaCoordinator(admission: admission, media: media)
+    defer {
+      player.close()
+      media.close()
+      admission.close()
+    }
+    player.play(target: PlaybackTarget(attachment: video, messageID: 912, kind: .video))
+    let ended = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+      player.isReady && player.durationMs > 0 && !player.isPlaying
+        && player.positionMs >= player.durationMs - 50
+    }, object: nil)
+    await fulfillment(of: [ended], timeout: 10)
+    let item = try XCTUnwrap(player.session.player.currentItem)
+    let end = player.positionMs
+
+    player.resume(immediately: true)
+    let replaying = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+      player.isPlaying && player.positionMs < end / 2
+    }, object: nil)
+    await fulfillment(of: [replaying], timeout: 6)
+    XCTAssertTrue(player.session.player.currentItem === item)
+    XCTAssertEqual(player.currentMessageID, 912)
+    try await h.close()
+  }
+
+  func testPhotoViewerCanRetryAnOriginalAfterFailureAndThenDismiss() async throws {
+    let (h, media, original) = try await make(mime: "image/jpeg")
+    let url = try media.fileURL(original.relativePath)
+    let attempts = Counter()
+    let completeRetry = DispatchSemaphore(value: 0)
+    let retryStarted = expectation(description: "Средство просмотра повторило чтение оригинала")
+    let scene = try XCTUnwrap(
+      UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+    let previous = scene.windows.first { $0.isKeyWindow }
+    let window = UIWindow(windowScene: scene)
+    let parent = UIViewController()
+    window.rootViewController = parent
+    window.makeKeyAndVisible()
+    defer {
+      completeRetry.signal()
+      parent.dismiss(animated: false)
+      window.isHidden = true
+      previous?.makeKeyAndVisible()
+      media.close()
+    }
+    let attachment = Attachment(
+      id: original.id, relativePath: "remote/0123456789abcdef0123456789abcdef.jpg",
+      mime: original.mime, byteSize: original.byteSize, rawWidth: original.rawWidth,
+      rawHeight: original.rawHeight, orientation: original.orientation, durationMs: nil,
+      thumbnailKey: original.thumbnailKey)
+    media.remoteFile = { _, preview, token in
+      if !preview {
+        let attempt = attempts.increment()
+        if attempt == 1 { throw MediaError.unavailable }
+        if attempt == 2 {
+          token.reportProgress(0.4)
+          retryStarted.fulfill()
+          guard completeRetry.wait(timeout: .now() + 8) == .success else {
+            throw MediaError.cancelled
+          }
+        }
+      }
+      return (url, "image/jpeg")
+    }
+    let viewer = PhotoViewerController(attachment: attachment, media: media)
+    parent.present(viewer, animated: false)
+    viewer.view.layoutIfNeeded()
+    let controls = viewer.view.subviews.compactMap { $0 as? UIControl }
+    let retry = try XCTUnwrap(controls.first { $0.accessibilityIdentifier == "media.retry" })
+    let progress = try XCTUnwrap(controls.first { $0.accessibilityIdentifier == "media.cancel" })
+    let close = try XCTUnwrap(controls.first { $0.accessibilityIdentifier == "photo.close" })
+    let failure = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+      !retry.isHidden && retry.accessibilityLabel == "Не удалось загрузить. Повторить"
+    }, object: nil)
+    await fulfillment(of: [failure], timeout: 8)
+    XCTAssertTrue(progress.isHidden)
+    retry.sendActions(for: .touchUpInside)
+    await fulfillment(of: [retryStarted], timeout: 8)
+    let percent = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+      !progress.isHidden && progress.accessibilityValue == "40%"
+    }, object: nil)
+    await fulfillment(of: [percent], timeout: 3)
+    completeRetry.signal()
+    let loaded = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+      guard let frame = viewer.retainedPreview() else { return false }
+      defer { frame.close() }
+      return !frame.isTinyPreview && progress.isHidden && retry.isHidden
+    }, object: nil)
+    await fulfillment(of: [loaded], timeout: 8)
+    close.sendActions(for: .touchUpInside)
+    let closed = XCTNSPredicateExpectation(
+      predicate: NSPredicate { _, _ in parent.presentedViewController == nil }, object: nil)
+    await fulfillment(of: [closed], timeout: 8)
+    XCTAssertGreaterThanOrEqual(attempts.value, 2)
     try await h.close()
   }
 

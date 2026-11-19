@@ -193,6 +193,35 @@ final class NetworkCatalogTests: XCTestCase {
     }
   }
 
+  func testBootstrapRejectsAnUnknownVersionAndAnotherAccountWithoutChangingSavedChats() async throws {
+    let harness = try await RepositoryHarness.open()
+    let cache = NetworkStore(userID: 1)
+    let initial = try catalog(count: 2, initial: true)
+    let previousCursor = try await harness.store.perform { db in
+      try NetworkSchema.install(db)
+      _ = try cache.bootstrap(db, data: initial)
+      return try cache.cursor(db)
+    }
+    let larger = try catalog(count: 3, initial: true)
+    let packet = try XCTUnwrap(JSONSerialization.jsonObject(with: larger) as? [String: Any])
+    for key in ["version", "userId"] {
+      var invalid = packet
+      invalid[key] = 2
+      invalid["cursor"] = previousCursor + 10
+      let data = try JSONSerialization.data(withJSONObject: invalid)
+      do {
+        _ = try await harness.store.perform { try cache.bootstrap($0, data: data) }
+        XCTFail("Начальное состояние с неверным полем \(key) должно быть отклонено")
+      } catch RepoError.corrupt {}
+      let cursor = try await harness.store.perform { try cache.cursor($0) }
+      let chats = try await harness.store.perform { try cache.studioRecent($0).threads.map(\.id) }
+      XCTAssertEqual(cursor, previousCursor)
+      XCTAssertEqual(chats, [1, 2])
+      XCTAssertEqual(try harness.rawScalar("SELECT count(*) FROM net_chats"), 2)
+    }
+    try await harness.close()
+  }
+
   // Передаёт двести карточек при обычном обновлении и проверяет размер и границу продолжения.
   // Иначе повторный запрос мог бы принимать меньший список, чем первый вход.
   func testRecentRefreshAcceptsCompleteServerCatalog() async throws {

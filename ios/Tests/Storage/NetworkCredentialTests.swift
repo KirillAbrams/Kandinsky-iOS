@@ -107,6 +107,35 @@ final class NetworkCredentialTests: XCTestCase {
         NetworkProfile(userId: 1234, deviceId: "bad", name: "Bad", token: "bad", expiresAtMs: 1)))
     XCTAssertEqual(try store.load()?.userId, 1010)
   }
+  func testAddingAnotherAccountKeepsTheLegacyActiveRecord() throws {
+    let service = "kandinsky.qa.legacy-active." + UUID().uuidString
+    let store = NetworkCredentialStore(service: service)
+    defer { clearTestCredentials(service: service) }
+    let old = NetworkProfile(userId: 101, deviceId: "old-device", name: "Первый профиль",
+      token: String(repeating: "a", count: 64), expiresAtMs: 500)
+    let new = NetworkProfile(userId: 102, deviceId: "new-device", name: "Второй профиль",
+      token: String(repeating: "b", count: 64), expiresAtMs: 600)
+    try store.save(old)
+    let list = [
+      kSecClass as String: kSecClassGenericPassword,
+      kSecAttrService as String: service,
+      kSecAttrAccount as String: "accounts",
+    ] as [String: Any]
+    XCTAssertEqual(SecItemDelete(list as CFDictionary), errSecSuccess)
+    XCTAssertEqual(try store.load()?.userId, old.userId)
+
+    try store.save(new)
+    XCTAssertEqual(try store.load()?.userId, new.userId)
+    let profiles = try store.profiles()
+    XCTAssertEqual(profiles.map(\.userId), [new.userId, old.userId])
+    let recovered = try XCTUnwrap(profiles.last)
+    XCTAssertEqual(recovered.token, old.token)
+    XCTAssertTrue(String(describing: recovered).contains(String(old.userId)))
+    XCTAssertFalse(String(describing: recovered).contains(old.token))
+    try store.save(recovered)
+    XCTAssertEqual(try store.load()?.userId, old.userId)
+  }
+
   // Сверяет отметку резервного копирования, уборку старых временных файлов и свойства ключей в
   // системном хранилище. Так можно обнаружить утечку ключей в копию или удаление файла активной
   // подготовки.

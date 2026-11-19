@@ -91,6 +91,27 @@ import AVFoundation
   // первый, чтобы ответы не перепутались.
   private func show(_ presenter: UIViewController) {
     guard !closing else { return }
+    let screen = Self.makeScreen(
+      session: session,
+      onCancel: { [weak self] in self?.cancel() },
+      onCapture: { [weak self] in
+        guard let self, !self.capturing, !self.closing else { return false }
+        self.capturing = true
+        self.output.capturePhoto(
+          with: AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.jpeg]),
+          delegate: self)
+        return true
+      })
+    preview = screen.preview
+    modal = screen.controller
+    presenter.present(screen.controller, animated: true)
+  }
+  // Собирает вид камеры. Кнопка съёмки принимает одно нажатие и не удерживает себя после ухода
+  // с экрана. Если сеанс уже закрывается, повторно включаем кнопку до завершения перехода.
+  static func makeScreen(
+    session: AVCaptureSession, onCancel: @escaping () -> Void,
+    onCapture: @escaping () -> Bool
+  ) -> (controller: UIViewController, preview: AVCaptureVideoPreviewLayer) {
     let vc = UIViewController()
     vc.view.backgroundColor = .black
     vc.modalPresentationStyle = .fullScreen
@@ -98,16 +119,11 @@ import AVFoundation
     layer.videoGravity = .resizeAspectFill
     layer.frame = vc.view.bounds
     vc.view.layer.addSublayer(layer)
-    preview = layer
     let cancel = UIButton(type: .system)
     cancel.setTitle("Отмена", for: .normal)
     cancel.frame = CGRect(x: 16, y: 64, width: 84, height: 48)
     cancel.accessibilityIdentifier = "capture.cancel"
-    cancel.addAction(
-      UIAction { [self] _ in
-        cancelled = true
-        if !capturing { finish(.failure(MediaError.cancelled)) }
-      }, for: .touchUpInside)
+    cancel.addAction(UIAction { _ in onCancel() }, for: .touchUpInside)
     let shutter = UIButton(type: .system)
     shutter.setTitle("●", for: .normal)
     shutter.titleLabel?.font = .systemFont(ofSize: 66)
@@ -117,18 +133,14 @@ import AVFoundation
     shutter.autoresizingMask = [.flexibleTopMargin, .flexibleLeftMargin, .flexibleRightMargin]
     shutter.accessibilityIdentifier = "capture.photo"
     shutter.addAction(
-      UIAction { [self] _ in
-        guard !capturing, !closing else { return }
-        capturing = true
+      UIAction { [weak shutter] _ in
+        guard let shutter, shutter.isEnabled else { return }
         shutter.isEnabled = false
-        output.capturePhoto(
-          with: AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.jpeg]),
-          delegate: self)
+        if !onCapture() { shutter.isEnabled = true }
       }, for: .touchUpInside)
     vc.view.addSubview(cancel)
     vc.view.addSubview(shutter)
-    modal = vc
-    presenter.present(vc, animated: true)
+    return (vc, layer)
   }
   // Получает байты обработанного снимка и его ошибку, передаёт их главному потоку. Этот шаг ещё
   // не означает, что камера закончила съёмку.
@@ -212,7 +224,12 @@ import AVFoundation
           completion = nil
           callback?(result)
         }
-        if let modal { modal.dismiss(animated: true, completion: done) } else { done() }
+        if let modal {
+          self.modal = nil
+          modal.dismiss(animated: true, completion: done)
+        } else {
+          done()
+        }
       }
     }
   }

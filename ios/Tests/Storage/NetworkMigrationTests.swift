@@ -170,6 +170,89 @@ final class NetworkMigrationTests: XCTestCase {
     try await h.close()
   }
 
+  func testVoiceReplyKeepsItsLocalTargetAndDropsAnInvalidWaveform() async throws {
+    let harness = try await RepositoryHarness.open()
+    let cache = NetworkStore(userID: 1)
+    let prompt: [String: Any] = [
+      "id": 910, "chatId": 2, "seq": 1, "senderId": 2, "clientId": UUID().uuidString,
+      "kind": "text", "text": "Исходное сообщение", "caption": "", "savedAtMs": 1000,
+      "revision": 1, "attachments": []
+    ]
+    let voiceClient = UUID().uuidString
+    func voicePage(revision: Int, waveform: [Int], includePrompt: Bool) throws -> Data {
+      let audio: [String: Any] = [
+        "blobId": String(repeating: "b", count: 64), "mime": "audio/mp4", "byteSize": 1024,
+        "rawWidth": 0, "rawHeight": 0, "orientation": 1, "durationMs": 800, "waveform": waveform
+      ]
+      let reply: [String: Any] = [
+        "id": 911, "chatId": 2, "seq": 2, "senderId": 2, "clientId": voiceClient,
+        "kind": "voice", "text": "", "caption": "", "replyToId": 910, "savedAtMs": 2000,
+        "revision": revision, "attachments": [audio]
+      ]
+      return try JSONSerialization.data(withJSONObject: [
+        "messages": includePrompt ? [prompt, reply] : [reply], "hasOlder": false
+      ])
+    }
+    let samples = [0, 128, 255]
+    let original = try voicePage(revision: 1, waveform: samples, includePrompt: true)
+    try await harness.store.perform { db in
+      try NetworkSchema.install(db)
+      try db.execute("INSERT INTO net_chats(chatID,title) VALUES(2,'Voice')")
+      _ = try cache.history(db, chat: 2, data: original)
+    }
+    let firstPage = try await harness.repo.history(PageRequest(chatID: 2))
+    let target = try XCTUnwrap(firstPage.rows.first { $0.text == "Исходное сообщение" })
+    let voice = try XCTUnwrap(firstPage.rows.first { $0.kind == .voice })
+    XCTAssertEqual(voice.replyToID, target.id)
+    XCTAssertEqual(voice.attachments.first?.waveform, samples.map(UInt8.init))
+
+    let invalid = try voicePage(revision: 2, waveform: [0, 256], includePrompt: false)
+    try await harness.store.perform { db in _ = try cache.history(db, chat: 2, data: invalid) }
+    let reopened = try await harness.reopen()
+    let changed = try await reopened.repo.history(PageRequest(chatID: 2))
+    XCTAssertEqual(changed.rows.count, 2)
+    let sameVoice = try XCTUnwrap(changed.rows.first { $0.id == voice.id })
+    XCTAssertEqual(sameVoice.replyToID, target.id)
+    XCTAssertEqual(try XCTUnwrap(sameVoice.attachments.first).durationMs, 800)
+    XCTAssertNil(sameVoice.attachments.first?.waveform)
+    try await reopened.close()
+  }
+
+  func testLateEventForADeletedMessageDoesNotCreateAnUnreadBadge() async throws {
+    let harness = try await RepositoryHarness.open()
+    let cache = NetworkStore(userID: 1)
+    func message(id: Int, at sequence: Int) -> [String: Any] {
+      [
+        "id": id, "chatId": 2, "seq": sequence, "senderId": 2, "clientId": UUID().uuidString,
+        "kind": "text", "text": "Сообщение \(id)", "caption": "", "savedAtMs": 1000,
+        "revision": 1, "attachments": []
+      ]
+    }
+    let late = message(id: 910, at: 100)
+    let fresh = message(id: 911, at: 101)
+    let eventBatch = try JSONSerialization.data(withJSONObject: [
+      "events": [
+        ["seq": 1, "kind": "deleted", "chatId": 2, "messageId": 910],
+        ["seq": 2, "kind": "message", "chatId": 2, "message": late],
+        ["seq": 3, "kind": "message", "chatId": 2, "message": fresh]
+      ],
+      "cursor": 3
+    ])
+    let unread = try await harness.store.perform { db in
+      try NetworkSchema.install(db)
+      try db.execute("INSERT INTO net_chats(chatID,title) VALUES(2,'Unread')")
+      let before = try db.scalar("SELECT unreadCount FROM chats WHERE id=2")
+      _ = try cache.events(db, data: eventBatch)
+      _ = try cache.events(db, data: eventBatch)
+      let after = try db.scalar("SELECT unreadCount FROM chats WHERE id=2")
+      return after - before
+    }
+    let history = try await harness.repo.history(PageRequest(chatID: 2))
+    XCTAssertEqual(history.rows.map(\.text), ["Сообщение 911"])
+    XCTAssertEqual(unread, 1, "Only the visible message may increase the unread count")
+    try await harness.close()
+  }
+
   // Проверяет в сетевом сценарии, что два исходных чата представлены по одному разу и номера
   // чатов не повторяются. Так начальная выдача не размножит строки списка.
   @MainActor func testAccountListsBothOriginalHistoriesOnce() async throws {
