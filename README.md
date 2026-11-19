@@ -85,32 +85,6 @@
 - [Образцы для проверки текста](fixtures/real-media/text-raster-samples.json) помогают сопоставить границы текста и его изображение при отрисовке ленты.
 - [Перечень движущихся картинок](fixtures/catalogue-media/catalogue.json) описывает три файла рядом. Они позволяют проверить, как окно просмотра работает с таким вложением.
 
-## Значки приложения
-
-Версия каталога указана в [общем описании значков](ios/Resources/Assets.xcassets/Contents.json). В каждой папке описание указывает сборке, какой рисунок использовать. [Разрешение на использование значков](ios/Resources/Heroicons-LICENSE.txt) входит в приложение.
-
-| Назначение | Файл или папка |
-| --- | --- |
-| Значок установленного приложения | [Значок](ios/Resources/Assets.xcassets/AppIcon.appiconset) |
-| Снять фото | [Камера](ios/Resources/Assets.xcassets/KandinskyAttachmentCamera.imageset) |
-| Выбрать снимок для запроса | [Снимок](ios/Resources/Assets.xcassets/KandinskyAttachmentPhoto.imageset) |
-| Начать новый чат | [Добавить](ios/Resources/Assets.xcassets/KandinskyDrawerAdd.imageset) |
-| Открыть архив | [Архив](ios/Resources/Assets.xcassets/KandinskyDrawerArchive.imageset) |
-| Вернуться из архива | [Назад](ios/Resources/Assets.xcassets/KandinskyDrawerBack.imageset) |
-| Выйти из аккаунта | [Выход](ios/Resources/Assets.xcassets/KandinskyDrawerLogout.imageset) |
-| Открыть действия чата или аккаунта | [Действия](ios/Resources/Assets.xcassets/KandinskyDrawerMore.imageset) |
-| Найти чат по названию | [Поиск](ios/Resources/Assets.xcassets/KandinskyDrawerSearch.imageset) |
-| Узор за сообщениями в чате | [Знак](ios/Resources/Assets.xcassets/KandinskyEvolution.imageset) |
-| Развернуть просмотр | [Развернуть](ios/Resources/Assets.xcassets/KandinskyExpand.imageset) |
-| Повторить генерацию | [Повтор](ios/Resources/Assets.xcassets/KandinskyGenerationRefresh.imageset) |
-| Отметить выбранную модель | [Отметка](ios/Resources/Assets.xcassets/KandinskyModelCheck.imageset) |
-| Обозначить модель видео | [Видео](ios/Resources/Assets.xcassets/KandinskyModelVideo.imageset) |
-| Открыть недавний ролик | [Ролик](ios/Resources/Assets.xcassets/KandinskyRecentVideo.imageset) |
-| Сохранить результат | [Сохранить](ios/Resources/Assets.xcassets/KandinskySave.imageset) |
-| Передать результат другому приложению | [Поделиться](ios/Resources/Assets.xcassets/KandinskyShare.imageset) |
-| Вернуться из полного просмотра загруженного видео | [Закрыть просмотр](ios/Resources/Assets.xcassets/KandinskyUploadClose.imageset) |
-| Отметить закреплённый чат | [Скрепка](ios/Resources/Assets.xcassets/HeroiconsPaperClip.imageset) |
-
 ## Связанные части проекта
 
 - [Сервер Кандинского](https://github.com/KirillAbrams/Kandinsky-Backend)
